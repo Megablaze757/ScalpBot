@@ -1,5 +1,12 @@
 # =============================================
-# ULTIMATE SCALPING BOT - FVG + SMART MONEY + MICROSTRUCTURE
+# ULTIMATE SMART MONEY SCALPING BOT
+# =============================================
+# Advanced features:
+# 1. Smart Money Concepts (SMC)
+# 2. Fair Value Gaps (FVGs)
+# 3. Market Microstructure Analysis
+# 4. Order Flow Analysis
+# 5. Binance API + CoinGecko API
 # =============================================
 
 import asyncio
@@ -13,8 +20,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import warnings
+import hmac
+import hashlib
+import urllib.parse
 import sqlite3
-import yfinance as yf
 import traceback
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
@@ -23,71 +32,1398 @@ from typing import Dict, List, Optional, Tuple, Any, Deque
 from dataclasses import dataclass
 from enum import Enum
 import aiohttp
-from collections import deque
+from collections import deque, defaultdict
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import joblib
-import pickle
+import talib
 
 warnings.filterwarnings('ignore')
 
 # =============================================
-# CONFIGURATION - ULTIMATE SCALPER
+# CONFIGURATION
 # =============================================
 TELEGRAM_BOT_TOKEN = "8285366409:AAH9kdy1D-xULBmGakAPFYUME19fmVCDJ9E"
 TELEGRAM_CHAT_ID = "-1003525746518"
 
+# API Configuration
+USE_BINANCE_API = True
+USE_COINGECKO_API = True
+
+# Binance API (Add your keys here)
+BINANCE_API_KEY = ""  # Your Binance API Key
+BINANCE_API_SECRET = ""  # Your Binance API Secret
+BINANCE_TESTNET = True  # Use testnet for safety
+
+# CoinGecko API
+COINGECKO_API_KEY = ""  # Optional: Get from coingecko.com
+
 # Trading Parameters
-SCAN_INTERVAL = 5  # 5 seconds for ultra-fast scanning
+SCAN_INTERVAL = 5  # 5 seconds for ultra-fast scalping
 MAX_CONCURRENT_TRADES = 3
-MAX_TRADE_DURATION = 600  # 10 minutes (ultra scalping)
-MIN_CONFIDENCE = 75  # Higher threshold for ultimate scalper
-RISK_PER_TRADE = 0.01  # 1% risk per trade for scalping
+MAX_TRADE_DURATION = 600  # 10 minutes max for scalping
+MIN_CONFIDENCE = 75  # Higher threshold for smart money
+RISK_PER_TRADE = 0.01  # 1% risk for scalping
+MAX_DAILY_RISK = 0.05  # 5% max daily risk
 
-# Analysis Mode: "SMART_MONEY" or "FVG_MICROSTRUCTURE"
-ANALYSIS_MODE = "SMART_MONEY"  # Ultimate scalping mode
-USE_LIVE_DATA = True
-TRAIN_WITH_HISTORICAL = True
-HISTORICAL_DAYS = 90  # 90 days for scalping patterns
-TRAIN_INTERVAL = 1800  # Retrain every 30 minutes
+# Strategy Mode
+STRATEGY_MODE = "SMART_MONEY"  # Options: SMART_MONEY, TRADITIONAL, ML_ENHANCED
 
-# Ultimate Scalping Pairs (Higher volatility)
+# Trading Pairs (Binance format)
 TRADING_PAIRS = [
-    "BTC-USD",
-    "ETH-USD"
+    "BTCUSDT",
+    "ETHUSDT"
 ]
 
-# Yahoo Finance symbols (correct format)
-YF_SYMBOLS = {
-    "BTC-USD": "BTC-USD",
-    "ETH-USD": "ETH-USD"
-}
+# Timeframes for multi-timeframe analysis
+TIMEFRAMES = ["1m", "5m", "15m"]  # Multi-timeframe analysis
 
-# Pip configurations for crypto
-PIP_CONFIG = {
-    "BTC-USD": 0.01,
-    "ETH-USD": 0.01,
-}
+# Smart Money Parameters
+FVG_THRESHOLD = 0.002  # 0.2% for FVG detection
+ORDER_BLOCK_PERCENTILE = 0.95  # 95th percentile for order blocks
+LIQUIDITY_POOL_DISTANCE = 0.01  # 1% distance for liquidity pools
+MARKET_STRUCTURE_BREAK_CONFIRMATION = 2  # Need 2 candles confirmation
 
-# Order Block/Imbalance sizes
-ORDER_BLOCK_SIZE = 0.002  # 0.2% for order blocks
-FVG_SIZE = 0.0015  # 0.15% for Fair Value Gaps
+# Risk Management
+TRAILING_STOP_PERCENT = 0.003  # 0.3% trailing stop
+PARTIAL_TP_LEVELS = [0.005, 0.01, 0.015]  # 0.5%, 1%, 1.5% targets
+POSITION_SCALING = True  # Scale into positions
 
-# Model paths
-MODEL_SAVE_PATH = "ultimate_models/"
+# File Paths
+MODEL_SAVE_PATH = "smart_money_models/"
+DATA_CACHE_PATH = "market_data/"
 os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+os.makedirs(DATA_CACHE_PATH, exist_ok=True)
 
 # =============================================
-# ULTIMATE TELEGRAM MANAGER
+# API CLIENTS
 # =============================================
 
-class UltimateTelegramManager:
-    """Telegram manager for ultimate scalping signals."""
+class BinanceClient:
+    """Binance API client for real market data."""
+    
+    def __init__(self, api_key=None, api_secret=None, testnet=True):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.testnet = testnet
+        self.base_url = "https://testnet.binancefuture.com" if testnet else "https://fapi.binance.com"
+        self.session = requests.Session()
+        self.session.headers.update({
+            'X-MBX-APIKEY': api_key if api_key else ''
+        })
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_duration = 2  # 2 seconds cache for scalping
+        
+    def _generate_signature(self, params):
+        """Generate HMAC SHA256 signature."""
+        query_string = urllib.parse.urlencode(params)
+        return hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+    
+    def get_klines(self, symbol: str, interval: str = '1m', limit: int = 500):
+        """Get candlestick data."""
+        cache_key = f"{symbol}_{interval}_{limit}"
+        current_time = time.time()
+        
+        # Check cache
+        if cache_key in self.cache and cache_key in self.cache_time:
+            if current_time - self.cache_time[cache_key] < self.cache_duration:
+                return self.cache[cache_key]
+        
+        try:
+            endpoint = "/fapi/v1/klines"
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'limit': limit
+            }
+            
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                df = pd.DataFrame(data, columns=[
+                    'open_time', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                    'taker_buy_quote', 'ignore'
+                ])
+                
+                # Convert to numeric
+                numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'quote_volume']
+                df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+                df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+                df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
+                
+                # Cache result
+                self.cache[cache_key] = df
+                self.cache_time[cache_key] = current_time
+                
+                return df
+                
+        except Exception as e:
+            print(f"⚠️ Binance API error for {symbol}: {e}")
+            
+        return None
+    
+    def get_order_book(self, symbol: str, limit: int = 20):
+        """Get order book data."""
+        try:
+            endpoint = "/fapi/v1/depth"
+            params = {'symbol': symbol, 'limit': limit}
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=3)
+            
+            if response.status_code == 200:
+                return response.json()
+                
+        except Exception as e:
+            print(f"⚠️ Binance order book error: {e}")
+            
+        return None
+    
+    def get_ticker(self, symbol: str):
+        """Get ticker data."""
+        try:
+            endpoint = "/fapi/v1/ticker/24hr"
+            params = {'symbol': symbol}
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=3)
+            
+            if response.status_code == 200:
+                return response.json()
+                
+        except Exception as e:
+            print(f"⚠️ Binance ticker error: {e}")
+            
+        return None
+    
+    def get_funding_rate(self, symbol: str):
+        """Get funding rate."""
+        try:
+            endpoint = "/fapi/v1/fundingRate"
+            params = {'symbol': symbol}
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=3)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    return data[0]
+                    
+        except Exception as e:
+            print(f"⚠️ Binance funding rate error: {e}")
+            
+        return None
+
+class CoinGeckoClient:
+    """CoinGecko API client for additional market data."""
+    
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+        self.base_url = "https://api.coingecko.com/api/v3"
+        self.session = requests.Session()
+        if api_key:
+            self.session.headers.update({'x-cg-demo-api-key': api_key})
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_duration = 30  # 30 seconds cache
+        
+    def get_coin_data(self, coin_id: str):
+        """Get coin data from CoinGecko."""
+        cache_key = f"coin_{coin_id}"
+        current_time = time.time()
+        
+        if cache_key in self.cache and cache_key in self.cache_time:
+            if current_time - self.cache_time[cache_key] < self.cache_duration:
+                return self.cache[cache_key]
+        
+        try:
+            endpoint = f"/coins/{coin_id}"
+            params = {
+                'localization': 'false',
+                'tickers': 'false',
+                'market_data': 'true',
+                'community_data': 'false',
+                'developer_data': 'false',
+                'sparkline': 'false'
+            }
+            
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.cache[cache_key] = data
+                self.cache_time[cache_key] = current_time
+                return data
+                
+        except Exception as e:
+            print(f"⚠️ CoinGecko API error: {e}")
+            
+        return None
+    
+    def get_market_chart(self, coin_id: str, days: int = 1):
+        """Get market chart data."""
+        cache_key = f"chart_{coin_id}_{days}"
+        current_time = time.time()
+        
+        if cache_key in self.cache and cache_key in self.cache_time:
+            if current_time - self.cache_time[cache_key] < self.cache_duration:
+                return self.cache[cache_key]
+        
+        try:
+            endpoint = f"/coins/{coin_id}/market_chart"
+            params = {'vs_currency': 'usd', 'days': days}
+            
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.cache[cache_key] = data
+                self.cache_time[cache_key] = current_time
+                return data
+                
+        except Exception as e:
+            print(f"⚠️ CoinGecko chart error: {e}")
+            
+        return None
+
+# =============================================
+# MARKET MICROSTRUCTURE ANALYZER
+# =============================================
+
+class MarketMicrostructureAnalyzer:
+    """Analyzes market microstructure for smart money detection."""
+    
+    def __init__(self):
+        self.order_flow_data = defaultdict(lambda: deque(maxlen=1000))
+        self.volume_profile = defaultdict(lambda: defaultdict(float))
+        self.time_sales = defaultdict(lambda: deque(maxlen=500))
+        
+    def analyze_order_imbalance(self, order_book: Dict) -> Dict:
+        """Analyze order book imbalance."""
+        if not order_book or 'bids' not in order_book or 'asks' not in order_book:
+            return {}
+        
+        bids = order_book['bids']
+        asks = order_book['asks']
+        
+        # Calculate bid/ask volumes
+        bid_volume = sum(float(bid[1]) for bid in bids)
+        ask_volume = sum(float(ask[1]) for ask in asks)
+        
+        # Calculate imbalance
+        total_volume = bid_volume + ask_volume
+        imbalance = (bid_volume - ask_volume) / total_volume if total_volume > 0 else 0
+        
+        # Calculate weighted average prices
+        weighted_bid = sum(float(bid[0]) * float(bid[1]) for bid in bids) / bid_volume if bid_volume > 0 else 0
+        weighted_ask = sum(float(ask[0]) * float(ask[1]) for ask in asks) / ask_volume if ask_volume > 0 else 0
+        
+        # Spread analysis
+        spread = weighted_ask - weighted_bid if weighted_ask > 0 and weighted_bid > 0 else 0
+        spread_percent = (spread / weighted_bid * 100) if weighted_bid > 0 else 0
+        
+        return {
+            'bid_volume': bid_volume,
+            'ask_volume': ask_volume,
+            'imbalance': imbalance,
+            'weighted_bid': weighted_bid,
+            'weighted_ask': weighted_ask,
+            'spread': spread,
+            'spread_percent': spread_percent,
+            'total_volume': total_volume,
+            'imbalance_strength': 'STRONG_BID' if imbalance > 0.3 else 
+                                 'STRONG_ASK' if imbalance < -0.3 else 
+                                 'NEUTRAL'
+        }
+    
+    def detect_liquidity_pools(self, price_data: pd.DataFrame, current_price: float) -> List[Dict]:
+        """Detect liquidity pools (high volume nodes)."""
+        if price_data is None or len(price_data) < 20:
+            return []
+        
+        pools = []
+        
+        # Calculate volume profile
+        price_col = 'close' if 'close' in price_data.columns else price_data.columns[4]
+        volume_col = 'volume' if 'volume' in price_data.columns else price_data.columns[5]
+        
+        # Group prices into buckets
+        price_min = price_data[price_col].min()
+        price_max = price_data[price_col].max()
+        bucket_size = (price_max - price_min) / 20
+        
+        if bucket_size <= 0:
+            return []
+        
+        # Create volume profile
+        volume_profile = {}
+        for idx, row in price_data.iterrows():
+            price = row[price_col]
+            volume = row[volume_col]
+            bucket = round(price / bucket_size) * bucket_size
+            
+            if bucket in volume_profile:
+                volume_profile[bucket] += volume
+            else:
+                volume_profile[bucket] = volume
+        
+        # Find high volume nodes (liquidity pools)
+        if volume_profile:
+            max_volume = max(volume_profile.values())
+            threshold = max_volume * 0.5  # 50% of max volume
+            
+            for price_level, volume in volume_profile.items():
+                if volume >= threshold:
+                    distance_pct = abs(price_level - current_price) / current_price
+                    
+                    pools.append({
+                        'price': price_level,
+                        'volume': volume,
+                        'distance_pct': distance_pct,
+                        'type': 'SUPPLY' if price_level > current_price else 'DEMAND',
+                        'strength': 'STRONG' if volume >= max_volume * 0.8 else 'MODERATE'
+                    })
+        
+        return sorted(pools, key=lambda x: x['volume'], reverse=True)[:5]  # Top 5 pools
+    
+    def analyze_market_structure(self, price_data: pd.DataFrame) -> Dict:
+        """Analyze market structure (higher highs, lower lows)."""
+        if price_data is None or len(price_data) < 50:
+            return {}
+        
+        price_col = 'close' if 'close' in price_data.columns else price_data.columns[4]
+        high_col = 'high' if 'high' in price_data.columns else price_data.columns[2]
+        low_col = 'low' if 'low' in price_data.columns else price_data.columns[3]
+        
+        prices = price_data[price_col].values
+        highs = price_data[high_col].values
+        lows = price_data[low_col].values
+        
+        # Detect swing highs and lows
+        swing_highs = []
+        swing_lows = []
+        
+        for i in range(2, len(prices) - 2):
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                swing_highs.append({'index': i, 'price': highs[i]})
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                swing_lows.append({'index': i, 'price': lows[i]})
+        
+        # Determine market structure
+        structure = "RANGING"
+        bias = "NEUTRAL"
+        
+        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+            # Check for Higher Highs (HH) and Higher Lows (HL) - Uptrend
+            last_high = swing_highs[-1]['price']
+            prev_high = swing_highs[-2]['price']
+            last_low = swing_lows[-1]['price']
+            prev_low = swing_lows[-2]['price']
+            
+            if last_high > prev_high and last_low > prev_low:
+                structure = "UPTREND"
+                bias = "BULLISH"
+            # Check for Lower Highs (LH) and Lower Lows (LL) - Downtrend
+            elif last_high < prev_high and last_low < prev_low:
+                structure = "DOWNTREND"
+                bias = "BEARISH"
+            # Check for market structure break
+            elif last_high > prev_high and last_low < prev_low:
+                structure = "STRUCTURE_BREAK_BULLISH"
+                bias = "BULLISH_BREAK"
+            elif last_high < prev_high and last_low > prev_low:
+                structure = "STRUCTURE_BREAK_BEARISH"
+                bias = "BEARISH_BREAK"
+        
+        return {
+            'structure': structure,
+            'bias': bias,
+            'swing_highs': swing_highs[-3:] if swing_highs else [],
+            'swing_lows': swing_lows[-3:] if swing_lows else [],
+            'current_high': highs[-1] if len(highs) > 0 else 0,
+            'current_low': lows[-1] if len(lows) > 0 else 0,
+            'support': swing_lows[-1]['price'] if swing_lows else lows[-1] if len(lows) > 0 else 0,
+            'resistance': swing_highs[-1]['price'] if swing_highs else highs[-1] if len(highs) > 0 else 0
+        }
+
+# =============================================
+# SMART MONEY ANALYZER
+# =============================================
+
+class SmartMoneyAnalyzer:
+    """Implements Smart Money Concepts (SMC) strategies."""
+    
+    def __init__(self):
+        self.fvg_cache = defaultdict(lambda: deque(maxlen=100))
+        self.order_blocks = defaultdict(lambda: deque(maxlen=50))
+        self.breakers = defaultdict(lambda: deque(maxlen=50))
+        self.equilibrium = defaultdict(lambda: deque(maxlen=100))
+        
+    def detect_fair_value_gaps(self, candle_data: pd.DataFrame) -> List[Dict]:
+        """Detect Fair Value Gaps (FVGs)."""
+        if candle_data is None or len(candle_data) < 3:
+            return []
+        
+        fvgs = []
+        
+        for i in range(1, len(candle_data) - 1):
+            prev_candle = candle_data.iloc[i-1]
+            current_candle = candle_data.iloc[i]
+            next_candle = candle_data.iloc[i+1]
+            
+            # Bullish FVG (price gap up)
+            if prev_candle['low'] > current_candle['high']:
+                fvg_size = prev_candle['low'] - current_candle['high']
+                fvg_percent = fvg_size / current_candle['high']
+                
+                if fvg_percent >= FVG_THRESHOLD:
+                    fvgs.append({
+                        'type': 'BULLISH_FVG',
+                        'start': current_candle['high'],
+                        'end': prev_candle['low'],
+                        'size': fvg_size,
+                        'size_percent': fvg_percent * 100,
+                        'timestamp': current_candle.name if hasattr(current_candle, 'name') else i,
+                        'age': len(candle_data) - i,
+                        'status': 'UNFILLED' if next_candle['low'] > current_candle['high'] else 'FILLING' if next_candle['low'] <= prev_candle['low'] else 'FILLED'
+                    })
+            
+            # Bearish FVG (price gap down)
+            elif prev_candle['high'] < current_candle['low']:
+                fvg_size = current_candle['low'] - prev_candle['high']
+                fvg_percent = fvg_size / prev_candle['high']
+                
+                if fvg_percent >= FVG_THRESHOLD:
+                    fvgs.append({
+                        'type': 'BEARISH_FVG',
+                        'start': prev_candle['high'],
+                        'end': current_candle['low'],
+                        'size': fvg_size,
+                        'size_percent': fvg_percent * 100,
+                        'timestamp': current_candle.name if hasattr(current_candle, 'name') else i,
+                        'age': len(candle_data) - i,
+                        'status': 'UNFILLED' if next_candle['high'] < current_candle['low'] else 'FILLING' if next_candle['high'] >= prev_candle['high'] else 'FILLED'
+                    })
+        
+        return fvgs
+    
+    def identify_order_blocks(self, candle_data: pd.DataFrame) -> List[Dict]:
+        """Identify Order Blocks (Smart Money accumulation/distribution)."""
+        if candle_data is None or len(candle_data) < 10:
+            return []
+        
+        order_blocks = []
+        
+        for i in range(3, len(candle_data) - 3):
+            current_candle = candle_data.iloc[i]
+            prev_candle = candle_data.iloc[i-1]
+            
+            # Bullish Order Block (after a drop, strong bullish candle)
+            if (prev_candle['close'] < prev_candle['open'] and  # Previous bearish candle
+                current_candle['close'] > current_candle['open'] and  # Current bullish candle
+                current_candle['close'] > prev_candle['high'] and  # Engulfing pattern
+                current_candle['volume'] > candle_data['volume'].rolling(5).mean().iloc[i]):  # Above average volume
+                
+                order_blocks.append({
+                    'type': 'BULLISH_OB',
+                    'high': current_candle['high'],
+                    'low': current_candle['low'],
+                    'mid': (current_candle['high'] + current_candle['low']) / 2,
+                    'timestamp': current_candle.name if hasattr(current_candle, 'name') else i,
+                    'volume': current_candle['volume'],
+                    'strength': 'STRONG' if current_candle['volume'] > candle_data['volume'].rolling(10).mean().iloc[i] * 1.5 else 'MODERATE'
+                })
+            
+            # Bearish Order Block (after a rally, strong bearish candle)
+            elif (prev_candle['close'] > prev_candle['open'] and  # Previous bullish candle
+                  current_candle['close'] < current_candle['open'] and  # Current bearish candle
+                  current_candle['close'] < prev_candle['low'] and  # Engulfing pattern
+                  current_candle['volume'] > candle_data['volume'].rolling(5).mean().iloc[i]):  # Above average volume
+                
+                order_blocks.append({
+                    'type': 'BEARISH_OB',
+                    'high': current_candle['high'],
+                    'low': current_candle['low'],
+                    'mid': (current_candle['high'] + current_candle['low']) / 2,
+                    'timestamp': current_candle.name if hasattr(current_candle, 'name') else i,
+                    'volume': current_candle['volume'],
+                    'strength': 'STRONG' if current_candle['volume'] > candle_data['volume'].rolling(10).mean().iloc[i] * 1.5 else 'MODERATE'
+                })
+        
+        return order_blocks[-5:]  # Last 5 order blocks
+    
+    def detect_breaker_blocks(self, candle_data: pd.DataFrame) -> List[Dict]:
+        """Detect Breaker Blocks (failed order blocks)."""
+        if candle_data is None or len(candle_data) < 10:
+            return []
+        
+        breakers = []
+        order_blocks = self.identify_order_blocks(candle_data)
+        
+        for ob in order_blocks:
+            ob_index = ob['timestamp']
+            if isinstance(ob_index, int) and ob_index < len(candle_data) - 5:
+                # Check if price has broken through the order block
+                subsequent_data = candle_data.iloc[ob_index+1:ob_index+6]
+                
+                if ob['type'] == 'BULLISH_OB':
+                    # Check if price dropped below bullish OB low
+                    if subsequent_data['low'].min() < ob['low']:
+                        breakers.append({
+                            'type': 'BEARISH_BREAKER',
+                            'original_ob': ob,
+                            'break_price': subsequent_data['low'].min(),
+                            'break_time': subsequent_data.index[subsequent_data['low'] == subsequent_data['low'].min()][0] if len(subsequent_data) > 0 else ob_index + 1,
+                            'strength': 'STRONG' if (ob['low'] - subsequent_data['low'].min()) / ob['low'] > 0.01 else 'MODERATE'
+                        })
+                
+                elif ob['type'] == 'BEARISH_OB':
+                    # Check if price rose above bearish OB high
+                    if subsequent_data['high'].max() > ob['high']:
+                        breakers.append({
+                            'type': 'BULLISH_BREAKER',
+                            'original_ob': ob,
+                            'break_price': subsequent_data['high'].max(),
+                            'break_time': subsequent_data.index[subsequent_data['high'] == subsequent_data['high'].max()][0] if len(subsequent_data) > 0 else ob_index + 1,
+                            'strength': 'STRONG' if (subsequent_data['high'].max() - ob['high']) / ob['high'] > 0.01 else 'MODERATE'
+                        })
+        
+        return breakers
+    
+    def calculate_equilibrium(self, candle_data: pd.DataFrame) -> Dict:
+        """Calculate market equilibrium (fair price)."""
+        if candle_data is None or len(candle_data) < 20:
+            return {}
+        
+        # Use VWAP as equilibrium
+        typical_price = (candle_data['high'] + candle_data['low'] + candle_data['close']) / 3
+        vwap = (typical_price * candle_data['volume']).sum() / candle_data['volume'].sum()
+        
+        # Calculate standard deviation bands
+        std_dev = typical_price.std()
+        
+        return {
+            'vwap': vwap,
+            'upper_band': vwap + std_dev,
+            'lower_band': vwap - std_dev,
+            'deviation_percent': (candle_data['close'].iloc[-1] - vwap) / vwap * 100,
+            'zone': 'ABOVE_EQUILIBRIUM' if candle_data['close'].iloc[-1] > vwap else 
+                   'BELOW_EQUILIBRIUM' if candle_data['close'].iloc[-1] < vwap else 
+                   'AT_EQUILIBRIUM'
+        }
+    
+    def generate_smc_signal(self, symbol: str, price_data: pd.DataFrame, 
+                           order_book: Dict, current_price: float) -> Dict:
+        """Generate Smart Money Concept trading signal."""
+        
+        # Get all SMC components
+        fvgs = self.detect_fair_value_gaps(price_data)
+        order_blocks = self.identify_order_blocks(price_data)
+        breaker_blocks = self.detect_breaker_blocks(price_data)
+        equilibrium = self.calculate_equilibrium(price_data)
+        
+        # Analyze price relative to SMC levels
+        signal = {
+            'symbol': symbol,
+            'timestamp': datetime.now(),
+            'current_price': current_price,
+            'fvgs': fvgs,
+            'order_blocks': order_blocks,
+            'breaker_blocks': breaker_blocks,
+            'equilibrium': equilibrium,
+            'signal': 'NEUTRAL',
+            'confidence': 0,
+            'reason': [],
+            'levels': {}
+        }
+        
+        # Check for FVG reactions
+        active_fvgs = [fvg for fvg in fvgs if fvg['status'] in ['UNFILLED', 'FILLING']]
+        
+        for fvg in active_fvgs:
+            if fvg['type'] == 'BULLISH_FVG' and current_price <= fvg['end']:
+                # Price entering bullish FVG
+                signal['reason'].append(f"Entering BULLISH_FVG ({fvg['size_percent']:.2f}%)")
+                signal['levels']['fvg_entry'] = fvg['start']
+                signal['levels']['fvg_target'] = fvg['end']
+                
+                if len(signal['reason']) >= 2:
+                    signal['signal'] = 'LONG'
+                    signal['confidence'] = min(85, signal['confidence'] + 40)
+            
+            elif fvg['type'] == 'BEARISH_FVG' and current_price >= fvg['start']:
+                # Price entering bearish FVG
+                signal['reason'].append(f"Entering BEARISH_FVG ({fvg['size_percent']:.2f}%)")
+                signal['levels']['fvg_entry'] = fvg['start']
+                signal['levels']['fvg_target'] = fvg['end']
+                
+                if len(signal['reason']) >= 2:
+                    signal['signal'] = 'SHORT'
+                    signal['confidence'] = min(85, signal['confidence'] + 40)
+        
+        # Check for Order Block reactions
+        recent_obs = [ob for ob in order_blocks if ob.get('age', 0) < 20]
+        
+        for ob in recent_obs:
+            ob_zone_low = ob['low'] * 0.998  # 0.2% buffer
+            ob_zone_high = ob['high'] * 1.002  # 0.2% buffer
+            
+            if ob_zone_low <= current_price <= ob_zone_high:
+                if ob['type'] == 'BULLISH_OB':
+                    signal['reason'].append(f"At BULLISH_OrderBlock (Strength: {ob['strength']})")
+                    signal['levels']['ob_support'] = ob['low']
+                    
+                    if ob['strength'] == 'STRONG':
+                        signal['confidence'] = min(90, signal['confidence'] + 45)
+                    else:
+                        signal['confidence'] = min(80, signal['confidence'] + 35)
+                        
+                    if signal['signal'] == 'NEUTRAL':
+                        signal['signal'] = 'LONG'
+                
+                elif ob['type'] == 'BEARISH_OB':
+                    signal['reason'].append(f"At BEARISH_OrderBlock (Strength: {ob['strength']})")
+                    signal['levels']['ob_resistance'] = ob['high']
+                    
+                    if ob['strength'] == 'STRONG':
+                        signal['confidence'] = min(90, signal['confidence'] + 45)
+                    else:
+                        signal['confidence'] = min(80, signal['confidence'] + 35)
+                        
+                    if signal['signal'] == 'NEUTRAL':
+                        signal['signal'] = 'SHORT'
+        
+        # Check for Breaker Block reactions (failed breakouts)
+        for breaker in breaker_blocks:
+            breaker_zone = breaker['break_price'] * 0.995 if breaker['type'] == 'BEARISH_BREAKER' else breaker['break_price'] * 1.005
+            
+            if (breaker['type'] == 'BEARISH_BREAKER' and current_price >= breaker_zone) or \
+               (breaker['type'] == 'BULLISH_BREAKER' and current_price <= breaker_zone):
+                
+                signal['reason'].append(f"Rejecting {breaker['type']} (Strength: {breaker['strength']})")
+                signal['levels']['breaker_level'] = breaker['break_price']
+                
+                if breaker['strength'] == 'STRONG':
+                    signal['confidence'] = min(95, signal['confidence'] + 50)
+                else:
+                    signal['confidence'] = min(85, signal['confidence'] + 40)
+                
+                # Breaker blocks often lead to reversals
+                if breaker['type'] == 'BEARISH_BREAKER':
+                    signal['signal'] = 'LONG'  # Failed bearish break -> bullish
+                else:
+                    signal['signal'] = 'SHORT'  # Failed bullish break -> bearish
+        
+        # Check equilibrium
+        if 'deviation_percent' in equilibrium:
+            deviation = equilibrium['deviation_percent']
+            
+            if deviation > 1.5:  # 1.5% above equilibrium
+                signal['reason'].append(f"Overbought vs VWAP ({deviation:.2f}%)")
+                signal['confidence'] = max(0, signal['confidence'] - 20)
+                if signal['signal'] == 'LONG':
+                    signal['signal'] = 'NEUTRAL'  # Cancel long if overbought
+                    
+            elif deviation < -1.5:  # 1.5% below equilibrium
+                signal['reason'].append(f"Oversold vs VWAP ({deviation:.2f}%)")
+                signal['confidence'] = max(0, signal['confidence'] - 20)
+                if signal['signal'] == 'SHORT':
+                    signal['signal'] = 'NEUTRAL'  # Cancel short if oversold
+        
+        # Final confidence adjustment
+        if len(signal['reason']) >= 3 and signal['confidence'] >= 70:
+            signal['confidence'] = min(95, signal['confidence'] + 10)
+        
+        return signal
+
+# =============================================
+# ENHANCED TECHNICAL ANALYZER WITH SMC
+# =============================================
+
+class EnhancedTechnicalAnalyzer:
+    """Combines traditional TA with Smart Money Concepts."""
+    
+    def __init__(self, binance_client: BinanceClient = None):
+        self.binance_client = binance_client
+        self.smart_money = SmartMoneyAnalyzer()
+        self.microstructure = MarketMicrostructureAnalyzer()
+        
+    async def analyze_symbol(self, symbol: str) -> Dict:
+        """Comprehensive analysis of a symbol."""
+        try:
+            # Get multi-timeframe data
+            tf_data = {}
+            for tf in TIMEFRAMES:
+                data = self.binance_client.get_klines(symbol, tf, 100)
+                if data is not None:
+                    tf_data[tf] = data
+            
+            if not tf_data:
+                return {}
+            
+            # Get current price from 1m data
+            current_price = tf_data['1m']['close'].iloc[-1] if '1m' in tf_data else 0
+            
+            # Get order book for microstructure
+            order_book = self.binance_client.get_order_book(symbol, 20)
+            
+            # Analyze Smart Money Concepts on 5m timeframe
+            smc_signal = {}
+            if '5m' in tf_data:
+                smc_signal = self.smart_money.generate_smc_signal(
+                    symbol, tf_data['5m'], order_book, current_price
+                )
+            
+            # Analyze microstructure
+            microstructure = {}
+            if order_book:
+                microstructure = self.microstructure.analyze_order_imbalance(order_book)
+                
+                # Add liquidity pool analysis
+                if '1m' in tf_data:
+                    liquidity_pools = self.microstructure.detect_liquidity_pools(
+                        tf_data['1m'], current_price
+                    )
+                    microstructure['liquidity_pools'] = liquidity_pools
+            
+            # Analyze market structure
+            market_structure = {}
+            if '15m' in tf_data:
+                market_structure = self.microstructure.analyze_market_structure(tf_data['15m'])
+            
+            # Traditional technical indicators on 1m
+            ta_indicators = {}
+            if '1m' in tf_data:
+                ta_indicators = self.calculate_ta_indicators(tf_data['1m'])
+            
+            # Combine all analyses
+            analysis = {
+                'symbol': symbol,
+                'timestamp': datetime.now(),
+                'current_price': current_price,
+                'timeframes': list(tf_data.keys()),
+                'smart_money': smc_signal,
+                'microstructure': microstructure,
+                'market_structure': market_structure,
+                'technical_indicators': ta_indicators,
+                'composite_signal': self.generate_composite_signal(
+                    smc_signal, microstructure, market_structure, ta_indicators
+                )
+            }
+            
+            return analysis
+            
+        except Exception as e:
+            print(f"❌ Error analyzing {symbol}: {e}")
+            return {}
+    
+    def calculate_ta_indicators(self, data: pd.DataFrame) -> Dict:
+        """Calculate traditional technical indicators."""
+        if data is None or len(data) < 20:
+            return {}
+        
+        closes = data['close'].values
+        highs = data['high'].values
+        lows = data['low'].values
+        volumes = data['volume'].values
+        
+        # RSI
+        rsi = talib.RSI(closes, timeperiod=14)[-1] if len(closes) >= 14 else 50
+        
+        # MACD
+        macd, macd_signal, macd_hist = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
+        macd_value = macd[-1] if not np.isnan(macd[-1]) else 0
+        macd_hist_value = macd_hist[-1] if not np.isnan(macd_hist[-1]) else 0
+        
+        # Bollinger Bands
+        bb_upper, bb_middle, bb_lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2)
+        bb_width = ((bb_upper[-1] - bb_lower[-1]) / bb_middle[-1]) * 100 if not np.isnan(bb_middle[-1]) else 0
+        
+        # ATR
+        atr = talib.ATR(highs, lows, closes, timeperiod=14)[-1] if len(closes) >= 14 else 0
+        
+        # Volume indicators
+        volume_sma = talib.SMA(volumes, timeperiod=20)[-1] if len(volumes) >= 20 else volumes[-1]
+        volume_ratio = volumes[-1] / volume_sma if volume_sma > 0 else 1
+        
+        # Support/Resistance
+        recent_high = np.max(highs[-20:]) if len(highs) >= 20 else highs[-1]
+        recent_low = np.min(lows[-20:]) if len(lows) >= 20 else lows[-1]
+        
+        return {
+            'rsi': rsi,
+            'macd': macd_value,
+            'macd_histogram': macd_hist_value,
+            'bb_upper': bb_upper[-1] if not np.isnan(bb_upper[-1]) else recent_high,
+            'bb_middle': bb_middle[-1] if not np.isnan(bb_middle[-1]) else np.mean(closes[-20:]),
+            'bb_lower': bb_lower[-1] if not np.isnan(bb_lower[-1]) else recent_low,
+            'bb_width': bb_width,
+            'atr': atr,
+            'atr_percent': (atr / closes[-1]) * 100 if closes[-1] > 0 else 0,
+            'volume_ratio': volume_ratio,
+            'recent_high': recent_high,
+            'recent_low': recent_low,
+            'price_position': (closes[-1] - recent_low) / (recent_high - recent_low) if recent_high != recent_low else 0.5,
+            'trend_strength': abs(macd_hist_value / closes[-1]) * 1000 if closes[-1] > 0 else 0
+        }
+    
+    def generate_composite_signal(self, smc_signal: Dict, microstructure: Dict, 
+                                 market_structure: Dict, ta_indicators: Dict) -> Dict:
+        """Generate composite trading signal from all analyses."""
+        
+        composite = {
+            'signal': 'NEUTRAL',
+            'confidence': 0,
+            'reasons': [],
+            'entry_zones': [],
+            'targets': [],
+            'stops': [],
+            'risk_reward': 0
+        }
+        
+        # Weighted scoring system
+        scores = {'LONG': 0, 'SHORT': 0, 'NEUTRAL': 0}
+        max_score = 0
+        
+        # 1. Smart Money Concepts (40% weight)
+        if smc_signal and 'signal' in smc_signal and smc_signal['signal'] != 'NEUTRAL':
+            sm_weight = 40
+            if smc_signal['signal'] == 'LONG':
+                scores['LONG'] += sm_weight * (smc_signal.get('confidence', 0) / 100)
+                composite['reasons'].append(f"SMC: {', '.join(smc_signal.get('reason', []))}")
+            elif smc_signal['signal'] == 'SHORT':
+                scores['SHORT'] += sm_weight * (smc_signal.get('confidence', 0) / 100)
+                composite['reasons'].append(f"SMC: {', '.join(smc_signal.get('reason', []))}")
+        
+        # 2. Market Structure (25% weight)
+        if market_structure:
+            ms_weight = 25
+            bias = market_structure.get('bias', 'NEUTRAL')
+            
+            if bias in ['BULLISH', 'BULLISH_BREAK']:
+                scores['LONG'] += ms_weight * 0.8
+                composite['reasons'].append(f"Market Structure: {bias}")
+            elif bias in ['BEARISH', 'BEARISH_BREAK']:
+                scores['SHORT'] += ms_weight * 0.8
+                composite['reasons'].append(f"Market Structure: {bias}")
+        
+        # 3. Microstructure/Order Flow (20% weight)
+        if microstructure:
+            mf_weight = 20
+            imbalance = microstructure.get('imbalance_strength', 'NEUTRAL')
+            
+            if imbalance == 'STRONG_BID':
+                scores['LONG'] += mf_weight * 0.7
+                composite['reasons'].append(f"Order Flow: Bid Dominance")
+            elif imbalance == 'STRONG_ASK':
+                scores['SHORT'] += mf_weight * 0.7
+                composite['reasons'].append(f"Order Flow: Ask Dominance")
+        
+        # 4. Technical Indicators (15% weight)
+        if ta_indicators:
+            ta_weight = 15
+            
+            # RSI based
+            rsi = ta_indicators.get('rsi', 50)
+            if rsi < 35:
+                scores['LONG'] += ta_weight * 0.6
+                composite['reasons'].append(f"RSI Oversold: {rsi:.1f}")
+            elif rsi > 65:
+                scores['SHORT'] += ta_weight * 0.6
+                composite['reasons'].append(f"RSI Overbought: {rsi:.1f}")
+            
+            # MACD histogram
+            macd_hist = ta_indicators.get('macd_histogram', 0)
+            if macd_hist > 0:
+                scores['LONG'] += ta_weight * 0.4
+            elif macd_hist < 0:
+                scores['SHORT'] += ta_weight * 0.4
+        
+        # Determine final signal
+        max_score = max(scores.values())
+        
+        if max_score >= 50:  # Minimum threshold
+            if scores['LONG'] > scores['SHORT'] and scores['LONG'] > scores['NEUTRAL']:
+                composite['signal'] = 'LONG'
+                composite['confidence'] = min(95, scores['LONG'])
+            elif scores['SHORT'] > scores['LONG'] and scores['SHORT'] > scores['NEUTRAL']:
+                composite['signal'] = 'SHORT'
+                composite['confidence'] = min(95, scores['SHORT'])
+        
+        # Calculate targets if we have a signal
+        if composite['signal'] != 'NEUTRAL' and composite['confidence'] >= MIN_CONFIDENCE:
+            composite = self.calculate_trade_levels(composite, smc_signal, ta_indicators)
+        
+        return composite
+    
+    def calculate_trade_levels(self, composite: Dict, smc_signal: Dict, ta_indicators: Dict) -> Dict:
+        """Calculate trade entry, targets, and stops."""
+        
+        if composite['signal'] == 'LONG':
+            # Entry zone (within 0.1% of current price)
+            current_price = ta_indicators.get('bb_middle', 0) or smc_signal.get('current_price', 0)
+            atr = ta_indicators.get('atr', 0)
+            
+            entry_low = current_price * 0.999
+            entry_high = current_price * 1.001
+            composite['entry_zones'] = [entry_low, entry_high]
+            
+            # Stop loss (below recent low or 1.5x ATR)
+            recent_low = ta_indicators.get('recent_low', current_price * 0.99)
+            stop_atr = current_price - (atr * 1.5)
+            stop_loss = min(recent_low, stop_atr)
+            composite['stops'] = [stop_loss]
+            
+            # Take profit levels
+            tp1 = current_price + (atr * 2)
+            tp2 = current_price + (atr * 3)
+            tp3 = current_price + (atr * 4)
+            composite['targets'] = [tp1, tp2, tp3]
+            
+            # Risk/Reward
+            risk = current_price - stop_loss
+            reward = tp3 - current_price
+            composite['risk_reward'] = reward / risk if risk > 0 else 0
+            
+        elif composite['signal'] == 'SHORT':
+            # Entry zone
+            current_price = ta_indicators.get('bb_middle', 0) or smc_signal.get('current_price', 0)
+            atr = ta_indicators.get('atr', 0)
+            
+            entry_low = current_price * 0.999
+            entry_high = current_price * 1.001
+            composite['entry_zones'] = [entry_low, entry_high]
+            
+            # Stop loss
+            recent_high = ta_indicators.get('recent_high', current_price * 1.01)
+            stop_atr = current_price + (atr * 1.5)
+            stop_loss = max(recent_high, stop_atr)
+            composite['stops'] = [stop_loss]
+            
+            # Take profit levels
+            tp1 = current_price - (atr * 2)
+            tp2 = current_price - (atr * 3)
+            tp3 = current_price - (atr * 4)
+            composite['targets'] = [tp1, tp2, tp3]
+            
+            # Risk/Reward
+            risk = stop_loss - current_price
+            reward = current_price - tp3
+            composite['risk_reward'] = reward / risk if risk > 0 else 0
+        
+        return composite
+
+# =============================================
+# SIGNAL GENERATOR
+# =============================================
+
+class UltimateSignalGenerator:
+    """Generates ultimate scalping signals with SMC."""
+    
+    def __init__(self, binance_client: BinanceClient, analyzer: EnhancedTechnicalAnalyzer):
+        self.binance_client = binance_client
+        self.analyzer = analyzer
+        self.signal_history = deque(maxlen=100)
+        self.last_signal_time = {}
+        
+    async def generate_signal(self, symbol: str, log_callback) -> Optional[Dict]:
+        """Generate ultimate scalping signal."""
+        
+        # Rate limiting: don't generate signals too frequently
+        current_time = time.time()
+        if symbol in self.last_signal_time:
+            if current_time - self.last_signal_time[symbol] < 30:  # 30 seconds cooldown
+                return None
+        
+        try:
+            # Perform comprehensive analysis
+            analysis = await self.analyzer.analyze_symbol(symbol)
+            
+            if not analysis or 'composite_signal' not in analysis:
+                return None
+            
+            signal_data = analysis['composite_signal']
+            
+            # Check minimum requirements
+            if signal_data['signal'] == 'NEUTRAL':
+                log_callback(f"⏸️ {symbol}: No clear signal (Confidence: {signal_data['confidence']:.1f}%)")
+                return None
+            
+            if signal_data['confidence'] < MIN_CONFIDENCE:
+                log_callback(f"⏸️ {symbol}: Confidence {signal_data['confidence']:.1f}% < {MIN_CONFIDENCE}%")
+                return None
+            
+            if signal_data.get('risk_reward', 0) < 1.5:
+                log_callback(f"⏸️ {symbol}: RRR {signal_data['risk_reward']:.1f} < 1.5")
+                return None
+            
+            # Create signal object
+            signal = {
+                'signal_id': f"SIG-{int(time.time())}-{random.randint(1000, 9999)}",
+                'symbol': symbol,
+                'direction': signal_data['signal'],
+                'entry_zones': signal_data.get('entry_zones', []),
+                'stop_loss': signal_data.get('stops', [0])[0],
+                'take_profits': signal_data.get('targets', []),
+                'confidence': signal_data['confidence'],
+                'risk_reward': signal_data.get('risk_reward', 0),
+                'reasons': signal_data.get('reasons', []),
+                'analysis': analysis,
+                'created_at': datetime.now(),
+                'expiry': datetime.now() + timedelta(seconds=MAX_TRADE_DURATION)
+            }
+            
+            # Calculate position size
+            current_price = analysis.get('current_price', 0)
+            stop_loss = signal['stop_loss']
+            
+            if signal['direction'] == 'LONG':
+                risk_amount = current_price - stop_loss
+            else:
+                risk_amount = stop_loss - current_price
+            
+            risk_percent = risk_amount / current_price if current_price > 0 else 0
+            position_size = (RISK_PER_TRADE / risk_percent) if risk_percent > 0 else 0
+            
+            signal['position_size'] = position_size
+            signal['risk_percent'] = risk_percent * 100
+            
+            # Log the signal
+            self.log_signal(signal, log_callback)
+            
+            # Update last signal time
+            self.last_signal_time[symbol] = current_time
+            
+            # Add to history
+            self.signal_history.append(signal)
+            
+            return signal
+            
+        except Exception as e:
+            log_callback(f"❌ Error generating signal for {symbol}: {str(e)}")
+            return None
+    
+    def log_signal(self, signal: Dict, log_callback):
+        """Log signal details."""
+        direction_emoji = "🟢" if signal['direction'] == 'LONG' else "🔴"
+        
+        log_callback(f"🎯 {signal['symbol']} {direction_emoji} {signal['direction']} SIGNAL")
+        log_callback(f"   Signal ID: {signal['signal_id']}")
+        log_callback(f"   Confidence: {signal['confidence']:.1f}%")
+        log_callback(f"   RRR: 1:{signal['risk_reward']:.1f}")
+        
+        if signal['entry_zones']:
+            log_callback(f"   Entry Zone: ${signal['entry_zones'][0]:.2f} - ${signal['entry_zones'][-1]:.2f}")
+        
+        log_callback(f"   Stop Loss: ${signal['stop_loss']:.2f}")
+        
+        if signal['take_profits']:
+            tp_text = " | ".join([f"TP{i+1}: ${tp:.2f}" for i, tp in enumerate(signal['take_profits'][:3])])
+            log_callback(f"   {tp_text}")
+        
+        log_callback(f"   Position Size: {signal['position_size']:.4f}")
+        log_callback(f"   Risk: {signal['risk_percent']:.2f}%")
+        
+        if signal['reasons']:
+            log_callback(f"   Reasons: {' | '.join(signal['reasons'][:3])}")
+
+# =============================================
+# ADVANCED TRADE MANAGER
+# =============================================
+
+class AdvancedTradeManager:
+    """Manages trades with advanced risk management."""
+    
+    def __init__(self, binance_client: BinanceClient, telegram_manager):
+        self.binance_client = binance_client
+        self.telegram_manager = telegram_manager
+        self.active_trades = {}
+        self.trade_history = []
+        self.daily_pnl = 0
+        self.daily_trades = 0
+        self.max_daily_trades = 20
+        
+    async def execute_trade(self, signal: Dict, log_callback) -> bool:
+        """Execute a trade."""
+        
+        # Check max concurrent trades
+        if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
+            log_callback(f"⚠️ Max concurrent trades reached ({MAX_CONCURRENT_TRADES})")
+            return False
+        
+        # Check daily trade limit
+        if self.daily_trades >= self.max_daily_trades:
+            log_callback(f"⚠️ Daily trade limit reached ({self.max_daily_trades})")
+            return False
+        
+        # Check daily risk limit
+        if abs(self.daily_pnl) > MAX_DAILY_RISK:
+            log_callback(f"⚠️ Daily risk limit reached ({self.daily_pnl:.2f}%)")
+            return False
+        
+        # Create trade object
+        trade_id = f"TRADE-{int(time.time())}-{random.randint(1000, 9999)}"
+        
+        trade = {
+            'trade_id': trade_id,
+            'signal': signal,
+            'entry_price': signal.get('entry_zones', [0])[0],  # Use lower entry zone
+            'stop_loss': signal['stop_loss'],
+            'take_profits': signal['take_profits'],
+            'position_size': signal['position_size'],
+            'direction': signal['direction'],
+            'status': 'OPEN',
+            'entry_time': datetime.now(),
+            'partial_closes': [],
+            'trailing_stop': None
+        }
+        
+        # Add to active trades
+        self.active_trades[trade_id] = trade
+        self.daily_trades += 1
+        
+        # Log trade
+        log_callback(f"✅ TRADE EXECUTED: {trade_id}")
+        log_callback(f"   {signal['symbol']} {signal['direction']}")
+        log_callback(f"   Entry: ${trade['entry_price']:.2f}")
+        log_callback(f"   Stop Loss: ${trade['stop_loss']:.2f}")
+        log_callback(f"   Position: {trade['position_size']:.4f}")
+        
+        # Send Telegram alert
+        await self.send_telegram_alert(signal, trade)
+        
+        return True
+    
+    async def monitor_trades(self, log_callback):
+        """Monitor and manage active trades."""
+        closed_trades = []
+        
+        for trade_id, trade in list(self.active_trades.items()):
+            try:
+                symbol = trade['signal']['symbol']
+                current_data = self.binance_client.get_klines(symbol, '1m', 5)
+                
+                if current_data is None or len(current_data) == 0:
+                    continue
+                
+                current_price = current_data['close'].iloc[-1]
+                direction = trade['direction']
+                
+                # Update trailing stop for profitable trades
+                if direction == 'LONG' and current_price > trade['entry_price']:
+                    new_trailing_stop = current_price * (1 - TRAILING_STOP_PERCENT)
+                    if trade['trailing_stop'] is None or new_trailing_stop > trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trailing_stop
+                
+                elif direction == 'SHORT' and current_price < trade['entry_price']:
+                    new_trailing_stop = current_price * (1 + TRAILING_STOP_PERCENT)
+                    if trade['trailing_stop'] is None or new_trailing_stop < trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trailing_stop
+                
+                # Check stop loss (including trailing stop)
+                stop_loss_price = trade['stop_loss']
+                if trade['trailing_stop'] is not None:
+                    if direction == 'LONG':
+                        stop_loss_price = max(stop_loss_price, trade['trailing_stop'])
+                    else:
+                        stop_loss_price = min(stop_loss_price, trade['trailing_stop'])
+                
+                # Check for stop loss hit
+                if (direction == 'LONG' and current_price <= stop_loss_price) or \
+                   (direction == 'SHORT' and current_price >= stop_loss_price):
+                    
+                    await self.close_trade(trade_id, current_price, 'STOP_LOSS', log_callback)
+                    closed_trades.append(trade_id)
+                    continue
+                
+                # Check for take profit hits
+                take_profits = trade['take_profits']
+                for i, tp in enumerate(take_profits):
+                    tp_level = f'TP{i+1}'
+                    
+                    if tp_level in trade['partial_closes']:
+                        continue
+                    
+                    if (direction == 'LONG' and current_price >= tp) or \
+                       (direction == 'SHORT' and current_price <= tp):
+                        
+                        # Partial close
+                        close_percentage = PARTIAL_TP_LEVELS[i] if i < len(PARTIAL_TP_LEVELS) else 0.5
+                        await self.partial_close(trade_id, tp, close_percentage, tp_level, log_callback)
+                        trade['partial_closes'].append(tp_level)
+                        
+                        # If all TPs hit, close trade
+                        if len(trade['partial_closes']) >= len(take_profits):
+                            await self.close_trade(trade_id, current_price, 'ALL_TP_HIT', log_callback)
+                            closed_trades.append(trade_id)
+                
+                # Check expiry
+                if datetime.now() > trade['signal']['expiry']:
+                    await self.close_trade(trade_id, current_price, 'EXPIRED', log_callback)
+                    closed_trades.append(trade_id)
+                    
+            except Exception as e:
+                log_callback(f"❌ Error monitoring trade {trade_id}: {str(e)}")
+        
+        # Remove closed trades
+        for trade_id in closed_trades:
+            if trade_id in self.active_trades:
+                del self.active_trades[trade_id]
+    
+    async def partial_close(self, trade_id: str, price: float, percentage: float, 
+                           level: str, log_callback):
+        """Partially close a trade."""
+        if trade_id not in self.active_trades:
+            return
+        
+        trade = self.active_trades[trade_id]
+        
+        # Calculate PnL for this partial close
+        if trade['direction'] == 'LONG':
+            pnl = (price - trade['entry_price']) * trade['position_size'] * percentage
+        else:
+            pnl = (trade['entry_price'] - price) * trade['position_size'] * percentage
+        
+        pnl_percent = (pnl / (trade['entry_price'] * trade['position_size'])) * 100
+        
+        log_callback(f"🎯 {trade_id}: Partial close at {level}")
+        log_callback(f"   Price: ${price:.2f}")
+        log_callback(f"   PnL: ${pnl:.2f} ({pnl_percent:.2f}%)")
+        
+        # Update position size
+        trade['position_size'] *= (1 - percentage)
+        
+        # Update daily PnL
+        self.daily_pnl += pnl_percent
+    
+    async def close_trade(self, trade_id: str, price: float, reason: str, log_callback):
+        """Close a trade completely."""
+        if trade_id not in self.active_trades:
+            return
+        
+        trade = self.active_trades[trade_id]
+        
+        # Calculate final PnL
+        if trade['direction'] == 'LONG':
+            pnl = (price - trade['entry_price']) * trade['position_size']
+        else:
+            pnl = (trade['entry_price'] - price) * trade['position_size']
+        
+        pnl_percent = (pnl / (trade['entry_price'] * trade['position_size'])) * 100
+        
+        # Calculate pips
+        pip_size = 0.01  # For crypto
+        if trade['direction'] == 'LONG':
+            pips = (price - trade['entry_price']) / pip_size
+        else:
+            pips = (trade['entry_price'] - price) / pip_size
+        
+        log_callback(f"🔒 TRADE CLOSED: {trade_id}")
+        log_callback(f"   Reason: {reason}")
+        log_callback(f"   Exit: ${price:.2f}")
+        log_callback(f"   PnL: ${pnl:.2f} ({pnl_percent:.2f}%)")
+        log_callback(f"   Pips: {pips:+.1f}")
+        log_callback(f"   {'💰 PROFIT' if pnl > 0 else '💸 LOSS'}")
+        
+        # Update daily PnL
+        self.daily_pnl += pnl_percent
+        
+        # Send Telegram closure
+        await self.send_telegram_closure(trade, price, pnl, pnl_percent, pips, reason)
+        
+        # Add to history
+        self.trade_history.append({
+            'trade_id': trade_id,
+            'symbol': trade['signal']['symbol'],
+            'direction': trade['direction'],
+            'entry': trade['entry_price'],
+            'exit': price,
+            'pnl': pnl,
+            'pnl_percent': pnl_percent,
+            'pips': pips,
+            'reason': reason,
+            'duration': (datetime.now() - trade['entry_time']).total_seconds() / 60
+        })
+    
+    async def send_telegram_alert(self, signal: Dict, trade: Dict):
+        """Send Telegram alert for new trade."""
+        try:
+            direction_emoji = "🟢" if signal['direction'] == 'LONG' else "🔴"
+            
+            message = f"""
+⚡ ULTIMATE SCALPING SIGNAL ⚡
+
+{direction_emoji} <strong>{signal['symbol']} {signal['direction']}</strong>
+Trade ID: {trade['trade_id']}
+Confidence: <strong>{signal['confidence']:.1f}%</strong>
+
+🎯 <strong>Trade Levels:</strong>
+Entry: ${trade['entry_price']:.2f}
+Stop Loss: ${trade['stop_loss']:.2f}
+Take Profit: ${trade['take_profits'][-1]:.2f}
+
+📊 <strong>Risk Management:</strong>
+Position Size: {trade['position_size']:.4f}
+Risk/Reward: 1:{signal['risk_reward']:.1f}
+Risk: {signal.get('risk_percent', 0):.2f}%
+
+💡 <strong>Signal Reasons:</strong>
+{chr(10).join(signal['reasons'][:3])}
+
+Time: {datetime.now().strftime('%H:%M:%S')}
+"""
+            
+            self.telegram_manager.send_message_sync(message)
+            
+        except Exception as e:
+            print(f"❌ Telegram alert error: {e}")
+    
+    async def send_telegram_closure(self, trade: Dict, exit_price: float, 
+                                  pnl: float, pnl_percent: float, pips: float, reason: str):
+        """Send Telegram closure alert."""
+        try:
+            result_emoji = "💰" if pnl > 0 else "💸"
+            
+            message = f"""
+{result_emoji} <strong>TRADE CLOSED</strong> {result_emoji}
+
+📊 <strong>Performance Summary:</strong>
+Symbol: {trade['signal']['symbol']}
+Direction: {trade['direction']}
+Trade ID: {trade['trade_id']}
+Duration: Scalping Trade
+
+💵 <strong>Results:</strong>
+Entry: ${trade['entry_price']:.2f}
+Exit: ${exit_price:.2f}
+PnL: ${pnl:.2f}
+PnL %: {pnl_percent:.2f}%
+Pips: {pips:+.1f}
+
+📝 <strong>Details:</strong>
+Reason: {reason}
+Confidence Was: {trade['signal']['confidence']:.1f}%
+
+Closed at: {datetime.now().strftime('%H:%M:%S')}
+"""
+            
+            self.telegram_manager.send_message_sync(message)
+            
+        except Exception as e:
+            print(f"❌ Telegram closure error: {e}")
+
+# =============================================
+# TELEGRAM MANAGER (SAME AS BEFORE)
+# =============================================
+
+class TelegramManager:
+    """Manages Telegram notifications."""
     
     def __init__(self):
         self.bot_token = TELEGRAM_BOT_TOKEN
@@ -106,20 +1442,17 @@ class UltimateTelegramManager:
                 if data.get("ok"):
                     bot_name = data['result']['username']
                     print(f"✅ Telegram bot connected: @{bot_name}")
-                    
-                    # Send startup message
-                    self.send_message_sync("🚀 ULTIMATE SCALPING BOT ACTIVATED\n"
-                                          f"Mode: {ANALYSIS_MODE}\n"
-                                          f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     return True
                     
         except Exception as e:
             print(f"❌ Telegram test error: {e}")
+        
         return False
     
     def send_message_sync(self, message: str) -> bool:
         """Send Telegram message."""
         max_retries = 3
+        
         for attempt in range(max_retries):
             try:
                 url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
@@ -131,1310 +1464,273 @@ class UltimateTelegramManager:
                 }
                 
                 response = requests.post(url, json=payload, timeout=10)
+                
                 if response.status_code == 200:
                     return True
                 elif response.status_code == 429:
                     wait_time = 2 ** (attempt + 1)
+                    print(f"⚠️ Telegram rate limited, waiting {wait_time}s...")
                     time.sleep(wait_time)
-                    
+                else:
+                    print(f"⚠️ Telegram error {response.status_code}: {response.text}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        
             except Exception as e:
+                print(f"⚠️ Telegram network error: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(1)
+        
         return False
 
 # =============================================
-# ADVANCED DATA FETCHER
+# ULTIMATE SCALPING BOT
 # =============================================
 
-class AdvancedDataFetcher:
-    """Advanced data fetching with multiple timeframes."""
+class UltimateScalpingBot:
+    """The ultimate scalping bot with Smart Money Concepts."""
     
     def __init__(self):
-        self.cache = {}
-        self.cache_time = {}
-        self.cache_duration = 15  # Cache for 15 seconds
+        print("="*70)
+        print("🤖 ULTIMATE SMART MONEY SCALPING BOT")
+        print("="*70)
         
-    def get_live_price(self, symbol: str) -> Optional[float]:
-        """Get live price."""
-        try:
-            current_time = time.time()
-            if symbol in self.cache and symbol in self.cache_time:
-                if current_time - self.cache_time[symbol] < self.cache_duration:
-                    return self.cache[symbol]
-            
-            yf_symbol = YF_SYMBOLS.get(symbol, symbol)
-            ticker = yf.Ticker(yf_symbol)
-            data = ticker.history(period='1d', interval='1m')
-            
-            if len(data) > 0:
-                current_price = data['Close'].iloc[-1]
-                self.cache[symbol] = current_price
-                self.cache_time[symbol] = current_time
-                return current_price
-                
-        except Exception as e:
-            print(f"⚠️ Error fetching data for {symbol}: {e}")
-        return None
-    
-    def get_multiple_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
-        """Get data for multiple timeframes."""
-        timeframes = {}
-        try:
-            yf_symbol = YF_SYMBOLS.get(symbol, symbol)
-            ticker = yf.Ticker(yf_symbol)
-            
-            # 1-minute for microstructure
-            tf1 = ticker.history(period='1d', interval='1m')
-            if len(tf1) > 0:
-                timeframes['1m'] = tf1
-            
-            # 5-minute for order blocks
-            tf5 = ticker.history(period='5d', interval='5m')
-            if len(tf5) > 0:
-                timeframes['5m'] = tf5
-            
-            # 15-minute for FVGs
-            tf15 = ticker.history(period='15d', interval='15m')
-            if len(tf15) > 0:
-                timeframes['15m'] = tf15
-            
-            # 1-hour for higher timeframe structure
-            tf1h = ticker.history(period='30d', interval='1h')
-            if len(tf1h) > 0:
-                timeframes['1h'] = tf1h
-                
-        except Exception as e:
-            print(f"⚠️ Error fetching multiple timeframes for {symbol}: {e}")
-            
-        return timeframes
-
-# =============================================
-# SMART MONEY CONCEPTS ANALYZER
-# =============================================
-
-class SmartMoneyAnalyzer:
-    """Analyzes Smart Money Concepts: Order Blocks, Liquidity, FVGs."""
-    
-    def __init__(self, data_fetcher: AdvancedDataFetcher):
-        self.data_fetcher = data_fetcher
-        self.order_blocks = {}
-        self.fair_value_gaps = {}
-        self.liquidity_levels = {}
+        # Initialize Telegram
+        print("📡 Initializing Telegram...")
+        self.telegram = TelegramManager()
         
-    def analyze_order_blocks(self, symbol: str, timeframe: str = '5m'):
-        """Identify order blocks (market structure shifts)."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if timeframe not in timeframes:
-                return []
-            
-            data = timeframes[timeframe]
-            if len(data) < 20:
-                return []
-            
-            highs = data['High'].values
-            lows = data['Low'].values
-            closes = data['Close'].values
-            
-            order_blocks = []
-            
-            # Look for significant candles followed by reversal
-            for i in range(2, len(data) - 2):
-                # Bullish order block (sell-side liquidity taken)
-                if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and  # Lower low
-                    closes[i+1] > closes[i] and closes[i+2] > closes[i+1]):  # Then reversal
-                    
-                    block = {
-                        'type': 'BULLISH_OB',
-                        'price_level': lows[i],
-                        'timestamp': data.index[i],
-                        'size': abs(highs[i] - lows[i]),
-                        'timeframe': timeframe
-                    }
-                    order_blocks.append(block)
-                
-                # Bearish order block (buy-side liquidity taken)
-                elif (highs[i] > highs[i-1] and highs[i] > highs[i-2] and  # Higher high
-                      closes[i+1] < closes[i] and closes[i+2] < closes[i+1]):  # Then reversal
-                    
-                    block = {
-                        'type': 'BEARISH_OB',
-                        'price_level': highs[i],
-                        'timestamp': data.index[i],
-                        'size': abs(highs[i] - lows[i]),
-                        'timeframe': timeframe
-                    }
-                    order_blocks.append(block)
-            
-            self.order_blocks[symbol] = order_blocks
-            return order_blocks
-            
-        except Exception as e:
-            print(f"⚠️ Error analyzing order blocks for {symbol}: {e}")
-            return []
-    
-    def analyze_fair_value_gaps(self, symbol: str, timeframe: str = '15m'):
-        """Identify Fair Value Gaps (imbalances)."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if timeframe not in timeframes:
-                return []
-            
-            data = timeframes[timeframe]
-            if len(data) < 10:
-                return []
-            
-            highs = data['High'].values
-            lows = data['Low'].values
-            fvgs = []
-            
-            # Look for gaps between candles
-            for i in range(1, len(data) - 1):
-                # Bullish FVG (gap up)
-                if lows[i] > highs[i-1]:
-                    fvg = {
-                        'type': 'BULLISH_FVG',
-                        'top': highs[i-1],
-                        'bottom': lows[i],
-                        'midpoint': (highs[i-1] + lows[i]) / 2,
-                        'timestamp': data.index[i],
-                        'size': abs(lows[i] - highs[i-1]),
-                        'timeframe': timeframe
-                    }
-                    fvgs.append(fvg)
-                
-                # Bearish FVG (gap down)
-                elif highs[i] < lows[i-1]:
-                    fvg = {
-                        'type': 'BEARISH_FVG',
-                        'top': lows[i-1],
-                        'bottom': highs[i],
-                        'midpoint': (lows[i-1] + highs[i]) / 2,
-                        'size': abs(lows[i-1] - highs[i]),
-                        'timestamp': data.index[i],
-                        'timeframe': timeframe
-                    }
-                    fvgs.append(fvg)
-            
-            self.fair_value_gaps[symbol] = fvgs
-            return fvgs
-            
-        except Exception as e:
-            print(f"⚠️ Error analyzing FVGs for {symbol}: {e}")
-            return []
-    
-    def analyze_liquidity_levels(self, symbol: str):
-        """Identify liquidity pools (previous highs/lows)."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if '1h' not in timeframes:
-                return []
-            
-            data = timeframes['1h']
-            if len(data) < 50:
-                return []
-            
-            # Recent swing highs and lows
-            highs = data['High'].values[-50:]
-            lows = data['Low'].values[-50:]
-            
-            # Find significant swing points
-            swing_highs = []
-            swing_lows = []
-            
-            for i in range(2, len(highs) - 2):
-                if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and
-                    highs[i] > highs[i+1] and highs[i] > highs[i+2]):
-                    swing_highs.append(highs[i])
-                
-                if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and
-                    lows[i] < lows[i+1] and lows[i] < lows[i+2]):
-                    swing_lows.append(lows[i])
-            
-            liquidity_levels = {
-                'swing_highs': sorted(swing_highs)[-5:],  # Top 5 recent swing highs
-                'swing_lows': sorted(swing_lows)[:5],     # Bottom 5 recent swing lows
-                'current_high': max(highs[-20:]),
-                'current_low': min(lows[-20:])
-            }
-            
-            self.liquidity_levels[symbol] = liquidity_levels
-            return liquidity_levels
-            
-        except Exception as e:
-            print(f"⚠️ Error analyzing liquidity for {symbol}: {e}")
-            return []
-    
-    def analyze_break_of_structure(self, symbol: str, timeframe: str = '5m'):
-        """Analyze Break of Structure (BOS) and Change of Character (CHOCH)."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if timeframe not in timeframes:
-                return None
-            
-            data = timeframes[timeframe]
-            if len(data) < 30:
-                return None
-            
-            closes = data['Close'].values
-            highs = data['High'].values
-            lows = data['Low'].values
-            
-            # Analyze market structure
-            structure = {
-                'higher_highs': 0,
-                'higher_lows': 0,
-                'lower_highs': 0,
-                'lower_lows': 0,
-                'bos_detected': False,
-                'choch_detected': False,
-                'trend': 'NEUTRAL'
-            }
-            
-            # Check last 10 swings
-            for i in range(20, len(closes) - 5):
-                # Check for higher highs
-                if highs[i] > highs[i-5] and highs[i] > highs[i-10]:
-                    structure['higher_highs'] += 1
-                
-                # Check for higher lows
-                if lows[i] > lows[i-5] and lows[i] > lows[i-10]:
-                    structure['higher_lows'] += 1
-                
-                # Check for lower highs
-                if highs[i] < highs[i-5] and highs[i] < highs[i-10]:
-                    structure['lower_highs'] += 1
-                
-                # Check for lower lows
-                if lows[i] < lows[i-5] and lows[i] < lows[i-10]:
-                    structure['lower_lows'] += 1
-            
-            # Determine trend
-            if structure['higher_highs'] > 3 and structure['higher_lows'] > 3:
-                structure['trend'] = 'BULLISH'
-            elif structure['lower_highs'] > 3 and structure['lower_lows'] > 3:
-                structure['trend'] = 'BEARISH'
-            
-            # Check for BOS (break of previous swing point)
-            if len(closes) > 25:
-                recent_high = max(highs[-25:-5])
-                recent_low = min(lows[-25:-5])
-                
-                if highs[-1] > recent_high:
-                    structure['bos_detected'] = True
-                    structure['bos_type'] = 'BULLISH'
-                elif lows[-1] < recent_low:
-                    structure['bos_detected'] = True
-                    structure['bos_type'] = 'BEARISH'
-            
-            # Check for CHOCH (change from HH/HL to LH/LL or vice versa)
-            if (structure['higher_highs'] > 2 and structure['higher_lows'] > 2 and
-                structure['lower_highs'] > 0 and structure['lower_lows'] > 0):
-                structure['choch_detected'] = True
-                structure['choch_type'] = 'BEARISH_REVERSAL'
-            elif (structure['lower_highs'] > 2 and structure['lower_lows'] > 2 and
-                  structure['higher_highs'] > 0 and structure['higher_lows'] > 0):
-                structure['choch_detected'] = True
-                structure['choch_type'] = 'BULLISH_REVERSAL'
-            
-            return structure
-            
-        except Exception as e:
-            print(f"⚠️ Error analyzing structure for {symbol}: {e}")
-            return None
-    
-    def get_smart_money_signal(self, symbol: str) -> Dict:
-        """Generate comprehensive smart money signal."""
-        try:
-            # Analyze all components
-            order_blocks = self.analyze_order_blocks(symbol, '5m')
-            fvgs = self.analyze_fair_value_gaps(symbol, '15m')
-            liquidity = self.analyze_liquidity_levels(symbol)
-            structure = self.analyze_break_of_structure(symbol, '5m')
-            
-            # Get current price
-            current_price = self.data_fetcher.get_live_price(symbol)
-            if current_price is None:
-                return None
-            
-            # Find nearest order blocks
-            nearest_bullish_ob = None
-            nearest_bearish_ob = None
-            ob_distance = float('inf')
-            
-            for ob in order_blocks:
-                distance = abs(current_price - ob['price_level'])
-                if distance < ob_distance:
-                    if ob['type'] == 'BULLISH_OB':
-                        nearest_bullish_ob = ob
-                    else:
-                        nearest_bearish_ob = ob
-                    ob_distance = distance
-            
-            # Find nearest FVG
-            nearest_fvg = None
-            fvg_distance = float('inf')
-            
-            for fvg in fvgs:
-                if fvg['type'] == 'BULLISH_FVG':
-                    if current_price <= fvg['bottom']:  # Price below bullish FVG
-                        distance = abs(current_price - fvg['bottom'])
-                        if distance < fvg_distance:
-                            nearest_fvg = fvg
-                            fvg_distance = distance
-                else:  # BEARISH_FVG
-                    if current_price >= fvg['top']:  # Price above bearish FVG
-                        distance = abs(current_price - fvg['top'])
-                        if distance < fvg_distance:
-                            nearest_fvg = fvg
-                            fvg_distance = distance
-            
-            # Determine signal
-            signal = {
-                'symbol': symbol,
-                'current_price': current_price,
-                'timestamp': datetime.now(),
-                'order_blocks': order_blocks,
-                'fvgs': fvgs,
-                'liquidity': liquidity,
-                'structure': structure,
-                'nearest_bullish_ob': nearest_bullish_ob,
-                'nearest_bearish_ob': nearest_bearish_ob,
-                'nearest_fvg': nearest_fvg,
-                'signal_strength': 0,
-                'direction': 'NEUTRAL',
-                'confidence': 0,
-                'reason': []
-            }
-            
-            # Calculate signal strength
-            strength_factors = []
-            
-            # Order Block proximity (30% weight)
-            if nearest_bullish_ob and ob_distance < current_price * 0.005:  # Within 0.5%
-                strength_factors.append(30)
-                signal['reason'].append(f"Near Bullish OB ({ob_distance/current_price*100:.2f}%)")
-                if current_price <= nearest_bullish_ob['price_level'] * 1.001:  # At or below OB
-                    strength_factors.append(20)
-                    signal['direction'] = 'LONG'
-            
-            elif nearest_bearish_ob and ob_distance < current_price * 0.005:
-                strength_factors.append(30)
-                signal['reason'].append(f"Near Bearish OB ({ob_distance/current_price*100:.2f}%)")
-                if current_price >= nearest_bearish_ob['price_level'] * 0.999:  # At or above OB
-                    strength_factors.append(20)
-                    signal['direction'] = 'SHORT'
-            
-            # FVG proximity (25% weight)
-            if nearest_fvg and fvg_distance < current_price * 0.003:  # Within 0.3%
-                strength_factors.append(25)
-                if nearest_fvg['type'] == 'BULLISH_FVG':
-                    signal['reason'].append(f"Near Bullish FVG ({fvg_distance/current_price*100:.2f}%)")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'LONG'
-                else:
-                    signal['reason'].append(f"Near Bearish FVG ({fvg_distance/current_price*100:.2f}%)")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'SHORT'
-            
-            # Market Structure (25% weight)
-            if structure:
-                if structure['trend'] == 'BULLISH' and structure['bos_detected']:
-                    strength_factors.append(25)
-                    signal['reason'].append("Bullish BOS detected")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'LONG'
-                elif structure['trend'] == 'BEARISH' and structure['bos_detected']:
-                    strength_factors.append(25)
-                    signal['reason'].append("Bearish BOS detected")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'SHORT'
-                
-                if structure['choch_detected']:
-                    strength_factors.append(15)
-                    signal['reason'].append(f"{structure['choch_type']} detected")
-            
-            # Liquidity proximity (20% weight)
-            if liquidity:
-                # Check distance to recent swing high/low (liquidity)
-                for swing_high in liquidity['swing_highs']:
-                    if abs(current_price - swing_high) < current_price * 0.002:  # Within 0.2%
-                        strength_factors.append(20)
-                        signal['reason'].append(f"Near swing high liquidity")
-                        signal['direction'] = 'SHORT'  # Expect rejection at swing high
-                        break
-                
-                for swing_low in liquidity['swing_lows']:
-                    if abs(current_price - swing_low) < current_price * 0.002:
-                        strength_factors.append(20)
-                        signal['reason'].append(f"Near swing low liquidity")
-                        signal['direction'] = 'LONG'  # Expect bounce at swing low
-                        break
-            
-            # Calculate total confidence
-            if strength_factors:
-                signal['signal_strength'] = sum(strength_factors)
-                signal['confidence'] = min(100, signal['signal_strength'])
-            
-            # Only return if confidence meets threshold
-            if signal['confidence'] >= MIN_CONFIDENCE and signal['direction'] != 'NEUTRAL':
-                signal['reason'] = " | ".join(signal['reason'])
-                return signal
-            
-        except Exception as e:
-            print(f"⚠️ Error generating smart money signal for {symbol}: {e}")
+        # Initialize Binance client
+        print("💰 Initializing Binance API...")
+        self.binance_client = BinanceClient(
+            api_key=BINANCE_API_KEY,
+            api_secret=BINANCE_API_SECRET,
+            testnet=BINANCE_TESTNET
+        )
         
-        return None
-
-# =============================================
-# MARKET MICROSTRUCTURE ANALYZER
-# =============================================
-
-class MicrostructureAnalyzer:
-    """Analyzes market microstructure for ultra-scalping."""
+        # Initialize CoinGecko client
+        if USE_COINGECKO_API:
+            print("📊 Initializing CoinGecko API...")
+            self.coingecko_client = CoinGeckoClient(api_key=COINGECKO_API_KEY)
+        
+        # Initialize analyzers
+        print("🧠 Initializing Smart Money Analyzer...")
+        self.analyzer = EnhancedTechnicalAnalyzer(self.binance_client)
+        
+        print("🎯 Initializing Signal Generator...")
+        self.signal_generator = UltimateSignalGenerator(self.binance_client, self.analyzer)
+        
+        print("💰 Initializing Trade Manager...")
+        self.trade_manager = AdvancedTradeManager(self.binance_client, self.telegram)
+        
+        # State
+        self.cycle_count = 0
+        self.signals_today = 0
+        self.paused = True
+        self.gui = None
+        
+        print("✅ Ultimate Scalping Bot initialized successfully")
+        print(f"   • Strategy Mode: {STRATEGY_MODE}")
+        print(f"   • Smart Money Concepts: ENABLED")
+        print(f"   • Market Microstructure: ENABLED")
+        print(f"   • Fair Value Gaps: ENABLED")
+        print(f"   • Timeframes: {', '.join(TIMEFRAMES)}")
+        print(f"   • Trading Pairs: {', '.join(TRADING_PAIRS)}")
+        print(f"   • Risk per Trade: {RISK_PER_TRADE*100}%")
+        print(f"   • Max Daily Risk: {MAX_DAILY_RISK*100}%")
+        print("="*70)
     
-    def __init__(self, data_fetcher: AdvancedDataFetcher):
-        self.data_fetcher = data_fetcher
-        self.order_flow = {}
-        self.imbalances = {}
-        
-    def analyze_order_flow_imbalance(self, symbol: str):
-        """Analyze order flow imbalance using 1-minute data."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if '1m' not in timeframes:
-                return None
-            
-            data = timeframes['1m']
-            if len(data) < 20:
-                return None
-            
-            closes = data['Close'].values
-            volumes = data['Volume'].values if 'Volume' in data.columns else np.ones(len(closes))
-            
-            # Calculate price changes and volume-weighted moves
-            price_changes = np.diff(closes)
-            volumes = volumes[1:]  # Align with price changes
-            
-            # Calculate buying vs selling pressure
-            buy_volume = np.sum(volumes[price_changes > 0])
-            sell_volume = np.sum(volumes[price_changes < 0])
-            total_volume = buy_volume + sell_volume
-            
-            if total_volume > 0:
-                buy_pressure = buy_volume / total_volume
-                sell_pressure = sell_volume / total_volume
-                imbalance = buy_pressure - sell_pressure
-            else:
-                buy_pressure = sell_pressure = 0.5
-                imbalance = 0
-            
-            # Analyze recent acceleration
-            recent_changes = price_changes[-5:]
-            acceleration = np.mean(np.diff(recent_changes)) if len(recent_changes) > 1 else 0
-            
-            # Detect absorption (large volume without price movement)
-            absorption_signals = []
-            for i in range(1, len(price_changes)):
-                if abs(price_changes[i]) < 0.0001 and volumes[i] > np.mean(volumes) * 1.5:
-                    absorption_signals.append({
-                        'index': i,
-                        'volume': volumes[i],
-                        'type': 'ABSORPTION'
-                    })
-            
-            microstructure = {
-                'buy_pressure': buy_pressure,
-                'sell_pressure': sell_pressure,
-                'imbalance': imbalance,
-                'acceleration': acceleration,
-                'absorption_count': len(absorption_signals),
-                'volume_trend': 'UP' if volumes[-1] > np.mean(volumes) else 'DOWN',
-                'current_momentum': 'BULLISH' if price_changes[-1] > 0 else 'BEARISH'
-            }
-            
-            self.order_flow[symbol] = microstructure
-            return microstructure
-            
-        except Exception as e:
-            print(f"⚠️ Error analyzing microstructure for {symbol}: {e}")
-            return None
+    def set_gui(self, gui):
+        """Set GUI."""
+        self.gui = gui
+        self.gui.add_log(f"🤖 Ultimate Scalping Bot Ready")
+        self.gui.add_log(f"🎯 Strategy: {STRATEGY_MODE}")
+        self.gui.add_log(f"📡 Telegram: @TheUltimateScalperBot")
+        self.gui.add_log(f"💰 Binance API: {'✅ Connected' if self.binance_client.api_key else '⚠️ Public Only'}")
+        self.gui.add_log(f"🧠 Smart Money Concepts: ENABLED")
+        self.gui.add_log(f"📊 Market Microstructure: ENABLED")
+        self.gui.add_log("🎯 Press START to begin ultimate scalping")
     
-    def detect_supply_demand_zones(self, symbol: str):
-        """Detect immediate supply and demand zones."""
-        try:
-            timeframes = self.data_fetcher.get_multiple_timeframes(symbol)
-            if '1m' not in timeframes:
-                return {'supply_zones': [], 'demand_zones': []}
-            
-            data = timeframes['1m']
-            if len(data) < 30:
-                return {'supply_zones': [], 'demand_zones': []}
-            
-            highs = data['High'].values
-            lows = data['Low'].values
-            closes = data['Close'].values
-            
-            supply_zones = []
-            demand_zones = []
-            
-            # Look for rejection candles (wicks)
-            for i in range(1, len(data) - 1):
-                candle_range = highs[i] - lows[i]
-                if candle_range == 0:
-                    continue
-                
-                # Upper wick > 60% of candle (supply zone)
-                upper_wick = highs[i] - max(closes[i], closes[i-1])
-                if upper_wick > candle_range * 0.6:
-                    zone = {
-                        'price': highs[i],
-                        'strength': upper_wick / candle_range,
-                        'timestamp': data.index[i]
-                    }
-                    supply_zones.append(zone)
-                
-                # Lower wick > 60% of candle (demand zone)
-                lower_wick = min(closes[i], closes[i-1]) - lows[i]
-                if lower_wick > candle_range * 0.6:
-                    zone = {
-                        'price': lows[i],
-                        'strength': lower_wick / candle_range,
-                        'timestamp': data.index[i]
-                    }
-                    demand_zones.append(zone)
-            
-            # Keep only recent zones (last 15 minutes)
-            recent_supply = [z for z in supply_zones if 
-                           (datetime.now() - z['timestamp']).total_seconds() < 900]
-            recent_demand = [z for z in demand_zones if 
-                           (datetime.now() - z['timestamp']).total_seconds() < 900]
-            
-            zones = {
-                'supply_zones': sorted(recent_supply, key=lambda x: x['strength'], reverse=True)[:3],
-                'demand_zones': sorted(recent_demand, key=lambda x: x['strength'], reverse=True)[:3]
-            }
-            
-            self.imbalances[symbol] = zones
-            return zones
-            
-        except Exception as e:
-            print(f"⚠️ Error detecting supply/demand zones for {symbol}: {e}")
-            return {'supply_zones': [], 'demand_zones': []}
-    
-    def get_microstructure_signal(self, symbol: str) -> Dict:
-        """Generate microstructure-based scalping signal."""
-        try:
-            # Get current price
-            current_price = self.data_fetcher.get_live_price(symbol)
-            if current_price is None:
-                return None
-            
-            # Analyze microstructure
-            order_flow = self.analyze_order_flow_imbalance(symbol)
-            zones = self.detect_supply_demand_zones(symbol)
-            
-            if order_flow is None:
-                return None
-            
-            signal = {
-                'symbol': symbol,
-                'current_price': current_price,
-                'timestamp': datetime.now(),
-                'order_flow': order_flow,
-                'zones': zones,
-                'signal_strength': 0,
-                'direction': 'NEUTRAL',
-                'confidence': 0,
-                'reason': []
-            }
-            
-            # Calculate signal based on microstructure
-            strength_factors = []
-            
-            # Order Flow Imbalance (40% weight)
-            imbalance = order_flow['imbalance']
-            if imbalance > 0.3:  # Strong buying pressure
-                strength_factors.append(40)
-                signal['reason'].append(f"Strong buy pressure ({imbalance:.2%})")
-                signal['direction'] = 'LONG'
-            elif imbalance < -0.3:  # Strong selling pressure
-                strength_factors.append(40)
-                signal['reason'].append(f"Strong sell pressure ({abs(imbalance):.2%})")
-                signal['direction'] = 'SHORT'
-            
-            # Supply/Demand Zone proximity (35% weight)
-            # Check distance to nearest supply zone
-            nearest_supply = None
-            supply_distance = float('inf')
-            for zone in zones['supply_zones']:
-                distance = abs(current_price - zone['price'])
-                if distance < supply_distance:
-                    nearest_supply = zone
-                    supply_distance = distance
-            
-            # Check distance to nearest demand zone
-            nearest_demand = None
-            demand_distance = float('inf')
-            for zone in zones['demand_zones']:
-                distance = abs(current_price - zone['price'])
-                if distance < demand_distance:
-                    nearest_demand = zone
-                    demand_distance = distance
-            
-            # Determine which zone is closer
-            if nearest_supply and supply_distance < demand_distance:
-                if supply_distance < current_price * 0.001:  # Within 0.1%
-                    strength_factors.append(35)
-                    signal['reason'].append(f"At supply zone ({supply_distance/current_price*100:.3f}%)")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'SHORT'  # Expect rejection at supply
-            
-            elif nearest_demand and demand_distance < supply_distance:
-                if demand_distance < current_price * 0.001:  # Within 0.1%
-                    strength_factors.append(35)
-                    signal['reason'].append(f"At demand zone ({demand_distance/current_price*100:.3f}%)")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'LONG'  # Expect bounce at demand
-            
-            # Momentum and Acceleration (25% weight)
-            acceleration = order_flow['acceleration']
-            momentum = order_flow['current_momentum']
-            
-            if abs(acceleration) > 0.0001:  # Significant acceleration
-                strength_factors.append(25)
-                if acceleration > 0 and momentum == 'BULLISH':
-                    signal['reason'].append(f"Bullish acceleration ({acceleration:.6f})")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'LONG'
-                elif acceleration < 0 and momentum == 'BEARISH':
-                    signal['reason'].append(f"Bearish acceleration ({acceleration:.6f})")
-                    if signal['direction'] == 'NEUTRAL':
-                        signal['direction'] = 'SHORT'
-            
-            # Absorption detection (bonus 15%)
-            if order_flow['absorption_count'] > 0:
-                strength_factors.append(15)
-                signal['reason'].append(f"{order_flow['absorption_count']} absorption candles")
-                # Absorption often precedes reversal
-            
-            # Calculate total confidence
-            if strength_factors:
-                signal['signal_strength'] = sum(strength_factors)
-                signal['confidence'] = min(100, signal['signal_strength'])
-            
-            # Only return if confidence meets threshold
-            if signal['confidence'] >= MIN_CONFIDENCE and signal['direction'] != 'NEUTRAL':
-                signal['reason'] = " | ".join(signal['reason'])
-                return signal
-            
-        except Exception as e:
-            print(f"⚠️ Error generating microstructure signal for {symbol}: {e}")
-        
-        return None
-
-# =============================================
-# ULTIMATE SIGNAL GENERATOR
-# =============================================
-
-class UltimateSignalGenerator:
-    """Generates ultimate scalping signals using multiple strategies."""
-    
-    def __init__(self, smart_money_analyzer: SmartMoneyAnalyzer, 
-                 microstructure_analyzer: MicrostructureAnalyzer,
-                 telegram: UltimateTelegramManager):
-        self.smart_money = smart_money_analyzer
-        self.microstructure = microstructure_analyzer
-        self.telegram = telegram
-        self.data_fetcher = smart_money_analyzer.data_fetcher
-        self.signal_history = []
-        
-    async def generate_ultimate_signal(self, symbol: str, log_callback) -> Optional[Dict]:
-        """Generate ultimate scalping signal."""
-        try:
-            current_price = self.data_fetcher.get_live_price(symbol)
-            if current_price is None:
-                return None
-            
-            signal = None
-            
-            if ANALYSIS_MODE == "SMART_MONEY":
-                # Smart Money Concepts signal
-                signal = self.smart_money.get_smart_money_signal(symbol)
-                strategy = "SMART_MONEY"
-            else:
-                # FVG + Microstructure signal
-                smart_signal = self.smart_money.get_smart_money_signal(symbol)
-                micro_signal = self.microstructure.get_microstructure_signal(symbol)
-                
-                # Combine signals if both available
-                if smart_signal and micro_signal:
-                    # Take the stronger signal
-                    if smart_signal['confidence'] >= micro_signal['confidence']:
-                        signal = smart_signal
-                        signal['reason'] += f" | Micro confluence: {micro_signal['reason']}"
-                        signal['confidence'] = min(100, (smart_signal['confidence'] + micro_signal['confidence']) / 2)
-                    else:
-                        signal = micro_signal
-                        signal['reason'] += f" | Smart Money confluence: {smart_signal['reason']}"
-                        signal['confidence'] = min(100, (smart_signal['confidence'] + micro_signal['confidence']) / 2)
-                    strategy = "FVG_MICROSTRUCTURE_COMBINED"
-                elif smart_signal:
-                    signal = smart_signal
-                    strategy = "SMART_MONEY"
-                elif micro_signal:
-                    signal = micro_signal
-                    strategy = "MICROSTRUCTURE"
-                else:
-                    return None
-            
-            if signal and signal['confidence'] >= MIN_CONFIDENCE:
-                # Calculate precise entry, stop loss, and take profit
-                entry, stop_loss, take_profit = self.calculate_scalping_levels(
-                    symbol, current_price, signal['direction'], strategy
-                )
-                
-                # Calculate risk/reward
-                risk = abs(entry - stop_loss)
-                reward = abs(take_profit - entry)
-                risk_reward = reward / risk if risk > 0 else 0
-                
-                # Minimum 1:2.5 RRR for ultimate scalping
-                if risk_reward < 2.5:
-                    log_callback(f"⏸️ {symbol}: RRR 1:{risk_reward:.1f} < 1:2.5")
-                    return None
-                
-                # Calculate position size (1% risk for scalping)
-                pip_size = PIP_CONFIG.get(symbol, 0.01)
-                risk_pips = risk / pip_size
-                position_size = (RISK_PER_TRADE * 10000) / risk_pips
-                
-                # Create final signal
-                ultimate_signal = {
-                    'signal_id': f"ULT-{int(time.time())}-{random.randint(1000, 9999)}",
-                    'symbol': symbol,
-                    'strategy': strategy,
-                    'direction': signal['direction'],
-                    'entry_price': round(entry, 4),
-                    'stop_loss': round(stop_loss, 4),
-                    'take_profit': round(take_profit, 4),
-                    'confidence': signal['confidence'],
-                    'risk_reward': risk_reward,
-                    'position_size': round(position_size, 6),  # Small positions for scalping
-                    'risk_pips': round(risk_pips, 1),
-                    'target_pips': round(reward / pip_size, 1),
-                    'reason': signal['reason'],
-                    'current_price': current_price,
-                    'created_at': datetime.now(),
-                    'expiry': datetime.now() + timedelta(minutes=10),  # 10 minute expiry for scalping
-                    'status': 'PENDING'
-                }
-                
-                # Log signal
-                log_callback(f"⚡ ULTIMATE {symbol} {signal['direction']} SCALP")
-                log_callback(f"   Strategy: {strategy}")
-                log_callback(f"   Price: ${current_price:.2f}")
-                log_callback(f"   Entry: ${entry:.2f} | SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}")
-                log_callback(f"   Risk: {risk_pips:.1f}pips | Target: {reward/pip_size:.1f}pips")
-                log_callback(f"   Confidence: {signal['confidence']:.1f}% | RRR: 1:{risk_reward:.1f}")
-                log_callback(f"   Position: {position_size:.6f}")
-                log_callback(f"   Reason: {signal['reason']}")
-                
-                self.signal_history.append(ultimate_signal)
-                return ultimate_signal
-                
-        except Exception as e:
-            log_callback(f"❌ Error generating ultimate signal for {symbol}: {str(e)}")
-        
-        return None
-    
-    def calculate_scalping_levels(self, symbol: str, current_price: float, 
-                                 direction: str, strategy: str) -> Tuple[float, float, float]:
-        """Calculate precise scalping levels."""
-        pip_size = PIP_CONFIG.get(symbol, 0.01)
-        
-        if strategy == "SMART_MONEY" or "FVG" in strategy:
-            # Tighter stops for smart money concepts
-            if direction == "LONG":
-                entry = current_price
-                stop_loss = entry - (15 * pip_size)  # 15 pip stop for scalping
-                take_profit = entry + (40 * pip_size)  # 40 pip target (1:2.67 RRR)
-            else:  # SHORT
-                entry = current_price
-                stop_loss = entry + (15 * pip_size)
-                take_profit = entry - (40 * pip_size)
-        else:
-            # Even tighter for microstructure
-            if direction == "LONG":
-                entry = current_price
-                stop_loss = entry - (10 * pip_size)  # 10 pip stop
-                take_profit = entry + (30 * pip_size)  # 30 pip target (1:3 RRR)
-            else:  # SHORT
-                entry = current_price
-                stop_loss = entry + (10 * pip_size)
-                take_profit = entry - (30 * pip_size)
-        
-        return entry, stop_loss, take_profit
-
-# =============================================
-# ULTIMATE TRADE MANAGER
-# =============================================
-
-class UltimateTradeManager:
-    """Manages ultra-scalping trades."""
-    
-    def __init__(self, telegram: UltimateTelegramManager):
-        self.telegram = telegram
-        self.active_trades = {}
-        self.trade_history = []
-        self.scalping_stats = {
-            'wins': 0,
-            'losses': 0,
-            'total_pips': 0,
-            'total_pnl': 0,
-            'win_streak': 0,
-            'loss_streak': 0,
-            'current_streak': 0
-        }
-    
-    async def execute_trade(self, signal: Dict, log_callback) -> bool:
-        """Execute an ultra-scalping trade."""
-        if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-            log_callback(f"⚠️ Max trades reached ({MAX_CONCURRENT_TRADES})")
-            return False
-        
-        self.active_trades[signal['signal_id']] = {
-            'signal': signal,
-            'entry_time': datetime.now(),
-            'status': 'ACTIVE',
-            'breakeven_moved': False,
-            'partial_tp_moved': False
-        }
-        
-        log_callback(f"✅ ULTIMATE SCALP EXECUTED: {signal['signal_id']}")
-        log_callback(f"   {signal['symbol']} {signal['direction']} | {signal['strategy']}")
-        log_callback(f"   Confidence: {signal['confidence']:.1f}%")
-        
-        # Send Telegram alert
-        await self.send_ultimate_telegram_alert(signal)
-        
-        return True
-    
-    async def send_ultimate_telegram_alert(self, signal: Dict):
-        """Send ultimate Telegram alert."""
-        try:
-            direction_emoji = "🟢" if signal['direction'] == "LONG" else "🔴"
-            strategy_emoji = "🎯" if "SMART_MONEY" in signal['strategy'] else "⚡"
-            
-            message = f"""
-{strategy_emoji} <b>ULTIMATE SCALPING SIGNAL</b> {strategy_emoji}
-
-{direction_emoji} <b>{signal['symbol']} {signal['direction']}</b>
-Strategy: {signal['strategy']}
-Confidence: <b>{signal['confidence']:.1f}%</b>
-
-🎯 <b>Scalping Levels:</b>
-Entry: ${signal['entry_price']:.2f}
-Stop Loss: ${signal['stop_loss']:.2f}
-Take Profit: ${signal['take_profit']:.2f}
-
-📊 <b>Ultra-Scalping Stats:</b>
-Risk: {signal['risk_pips']:.1f} pips
-Target: {signal['target_pips']:.1f} pips
-Risk/Reward: 1:{signal['risk_reward']:.1f}
-Position: {signal['position_size']:.6f}
-
-💡 <b>Signal Reason:</b>
-{signal['reason']}
-
-⏱️ <b>Timeframe:</b> 5-10 minute scalp
-⏰ Entry Window: {datetime.now().strftime('%H:%M:%S')}
-"""
-            
-            self.telegram.send_message_sync(message)
-            
-        except Exception as e:
-            print(f"❌ Telegram alert error: {e}")
-    
-    async def monitor_trades(self, data_fetcher: AdvancedDataFetcher, log_callback):
-        """Monitor active scalping trades with advanced management."""
-        closed_trades = []
-        
-        for signal_id, trade_data in list(self.active_trades.items()):
-            signal = trade_data['signal']
-            
-            try:
-                # Get current price
-                current_price = data_fetcher.get_live_price(signal['symbol'])
-                if current_price is None:
-                    continue
-                
-                elapsed_seconds = (datetime.now() - trade_data['entry_time']).total_seconds()
-                
-                # Check expiry (10 minutes max)
-                if elapsed_seconds > MAX_TRADE_DURATION:
-                    await self.close_trade(signal_id, current_price, "EXPIRED", log_callback)
-                    closed_trades.append(signal_id)
-                    continue
-                
-                if signal['direction'] == "LONG":
-                    # Check stop loss
-                    if current_price <= signal['stop_loss']:
-                        await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
-                        closed_trades.append(signal_id)
-                        self.update_stats(False, signal['risk_pips'])
-                    
-                    # Check take profit
-                    elif current_price >= signal['take_profit']:
-                        await self.close_trade(signal_id, current_price, "TAKE_PROFIT", log_callback)
-                        closed_trades.append(signal_id)
-                        self.update_stats(True, signal['target_pips'])
-                    
-                    # Move to breakeven at 1.5x risk
-                    elif (not trade_data['breakeven_moved'] and 
-                          current_price >= signal['entry_price'] + (signal['risk_pips'] * 1.5 * PIP_CONFIG.get(signal['symbol'], 0.01))):
-                        new_sl = signal['entry_price']
-                        trade_data['signal']['stop_loss'] = new_sl
-                        trade_data['breakeven_moved'] = True
-                        log_callback(f"🔄 {signal_id}: Moved to breakeven at ${current_price:.2f}")
-                    
-                    # Partial profit at 0.5x target
-                    elif (not trade_data['partial_tp_moved'] and 
-                          current_price >= signal['entry_price'] + (signal['target_pips'] * 0.5 * PIP_CONFIG.get(signal['symbol'], 0.01))):
-                        # Move stop loss to entry + 0.5x risk
-                        new_sl = signal['entry_price'] + (signal['risk_pips'] * 0.5 * PIP_CONFIG.get(signal['symbol'], 0.01))
-                        trade_data['signal']['stop_loss'] = new_sl
-                        trade_data['partial_tp_moved'] = True
-                        log_callback(f"🎯 {signal_id}: Partial TP secured at ${current_price:.2f}")
-                
-                else:  # SHORT
-                    if current_price >= signal['stop_loss']:
-                        await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
-                        closed_trades.append(signal_id)
-                        self.update_stats(False, signal['risk_pips'])
-                    
-                    elif current_price <= signal['take_profit']:
-                        await self.close_trade(signal_id, current_price, "TAKE_PROFIT", log_callback)
-                        closed_trades.append(signal_id)
-                        self.update_stats(True, signal['target_pips'])
-                    
-                    elif (not trade_data['breakeven_moved'] and 
-                          current_price <= signal['entry_price'] - (signal['risk_pips'] * 1.5 * PIP_CONFIG.get(signal['symbol'], 0.01))):
-                        new_sl = signal['entry_price']
-                        trade_data['signal']['stop_loss'] = new_sl
-                        trade_data['breakeven_moved'] = True
-                        log_callback(f"🔄 {signal_id}: Moved to breakeven at ${current_price:.2f}")
-                    
-                    elif (not trade_data['partial_tp_moved'] and 
-                          current_price <= signal['entry_price'] - (signal['target_pips'] * 0.5 * PIP_CONFIG.get(signal['symbol'], 0.01))):
-                        new_sl = signal['entry_price'] - (signal['risk_pips'] * 0.5 * PIP_CONFIG.get(signal['symbol'], 0.01))
-                        trade_data['signal']['stop_loss'] = new_sl
-                        trade_data['partial_tp_moved'] = True
-                        log_callback(f"🎯 {signal_id}: Partial TP secured at ${current_price:.2f}")
-                        
-            except Exception as e:
-                log_callback(f"❌ Error monitoring trade {signal_id}: {str(e)}")
-        
-        # Remove closed trades
-        for signal_id in closed_trades:
-            if signal_id in self.active_trades:
-                del self.active_trades[signal_id]
-    
-    def update_stats(self, win: bool, pips: float):
-        """Update scalping statistics."""
-        if win:
-            self.scalping_stats['wins'] += 1
-            self.scalping_stats['total_pips'] += pips
-            self.scalping_stats['current_streak'] = max(0, self.scalping_stats['current_streak']) + 1
-            self.scalping_stats['win_streak'] = max(self.scalping_stats['win_streak'], self.scalping_stats['current_streak'])
-        else:
-            self.scalping_stats['losses'] += 1
-            self.scalping_stats['total_pips'] -= pips
-            self.scalping_stats['current_streak'] = min(0, self.scalping_stats['current_streak']) - 1
-            self.scalping_stats['loss_streak'] = min(self.scalping_stats['loss_streak'], self.scalping_stats['current_streak'])
-    
-    async def close_trade(self, signal_id: str, exit_price: float, reason: str, log_callback):
-        """Close a trade."""
-        if signal_id not in self.active_trades:
+    async def run_cycle(self):
+        """Run one trading cycle."""
+        if self.paused:
             return
         
-        trade_data = self.active_trades[signal_id]
-        signal = trade_data['signal']
+        self.cycle_count += 1
         
-        # Calculate PnL
-        if signal['direction'] == "LONG":
-            pnl = (exit_price - signal['entry_price']) * signal['position_size']
-            pips = (exit_price - signal['entry_price']) / PIP_CONFIG.get(signal['symbol'], 0.01)
-        else:
-            pnl = (signal['entry_price'] - exit_price) * signal['position_size']
-            pips = (signal['entry_price'] - exit_price) / PIP_CONFIG.get(signal['symbol'], 0.01)
+        if self.gui:
+            self.gui.add_log(f"\n⚡ CYCLE {self.cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
         
-        pnl_percent = (pnl / (signal['entry_price'] * signal['position_size'])) * 100
-        win = pnl > 0
-        
-        log_callback(f"🔒 ULTIMATE SCALP CLOSED: {signal_id}")
-        log_callback(f"   Result: {'💰 WIN' if win else '💸 LOSS'}")
-        log_callback(f"   Reason: {reason}")
-        log_callback(f"   Exit: ${exit_price:.2f}")
-        log_callback(f"   PnL: ${pnl:.4f} ({pnl_percent:.2f}%)")
-        log_callback(f"   Pips: {pips:+.1f}")
-        log_callback(f"   Duration: {(datetime.now() - trade_data['entry_time']).total_seconds()/60:.1f}min")
-        
-        # Send Telegram closure
-        await self.send_ultimate_telegram_closure(signal, exit_price, pnl, pnl_percent, pips, reason, win)
-        
-        # Add to history
-        self.trade_history.append({
-            'signal_id': signal_id,
-            'symbol': signal['symbol'],
-            'strategy': signal['strategy'],
-            'direction': signal['direction'],
-            'entry': signal['entry_price'],
-            'exit': exit_price,
-            'pnl': pnl,
-            'pips': pips,
-            'reason': reason,
-            'duration': (datetime.now() - trade_data['entry_time']).total_seconds() / 60,
-            'win': win
-        })
-    
-    async def send_ultimate_telegram_closure(self, signal: Dict, exit_price: float, 
-                                           pnl: float, pnl_percent: float, pips: float, 
-                                           reason: str, win: bool):
-        """Send ultimate closure alert."""
         try:
-            result_emoji = "💰" if win else "💸"
+            # Monitor existing trades
+            await self.trade_manager.monitor_trades(
+                self.gui.add_log if self.gui else print
+            )
             
-            # Calculate win rate
-            total_trades = self.scalping_stats['wins'] + self.scalping_stats['losses']
-            win_rate = (self.scalping_stats['wins'] / total_trades * 100) if total_trades > 0 else 0
-            
-            message = f"""
-{result_emoji} <b>ULTIMATE SCALP CLOSED</b> {result_emoji}
-
-📊 <b>Performance Summary:</b>
-Symbol: {signal['symbol']}
-Strategy: {signal['strategy']}
-Direction: {signal['direction']}
-Result: {'WIN' if win else 'LOSS'}
-
-💵 <b>Trade Results:</b>
-Entry: ${signal['entry_price']:.2f}
-Exit: ${exit_price:.2f}
-PnL: ${pnl:.4f}
-PnL %: {pnl_percent:.2f}%
-Pips: {pips:+.1f}
-
-📈 <b>Overall Stats:</b>
-Win Rate: {win_rate:.1f}%
-Total Pips: {self.scalping_stats['total_pips']:+.1f}
-Current Streak: {abs(self.scalping_stats['current_streak'])} {'Wins' if self.scalping_stats['current_streak'] > 0 else 'Losses'}
-
-📝 <b>Details:</b>
-Reason: {reason}
-Confidence Was: {signal['confidence']:.1f}%
-Risk/Reward Was: 1:{signal['risk_reward']:.1f}
-
-⏰ Closed at: {datetime.now().strftime('%H:%M:%S')}
-"""
-            
-            self.telegram.send_message_sync(message)
-            
+            # Generate signals for each symbol
+            for symbol in TRADING_PAIRS:
+                # Check active trades for this symbol
+                active_for_symbol = sum(
+                    1 for trade in self.trade_manager.active_trades.values()
+                    if trade['signal']['symbol'] == symbol
+                )
+                
+                if active_for_symbol >= 1:  # Max 1 trade per symbol
+                    continue
+                
+                # Generate signal
+                signal = await self.signal_generator.generate_signal(
+                    symbol,
+                    self.gui.add_log if self.gui else print
+                )
+                
+                # Execute if valid
+                if signal:
+                    if await self.trade_manager.execute_trade(signal, self.gui.add_log if self.gui else print):
+                        self.signals_today += 1
+                        
         except Exception as e:
-            print(f"❌ Telegram closure error: {e}")
+            error_msg = f"❌ Cycle error: {str(e)}"
+            if self.gui:
+                self.gui.add_log(error_msg)
+            else:
+                print(error_msg)
+                traceback.print_exc()
+        
+        if self.gui:
+            self.gui.add_log(f"✅ Cycle completed")
+    
+    async def run(self):
+        """Main loop."""
+        print("🚀 Starting Ultimate Scalping Bot...")
+        print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if self.gui:
+            self.gui.add_log("✅ All systems initialized")
+            self.gui.add_log("✅ Smart Money Analysis active")
+            self.gui.add_log("✅ Telegram notifications enabled")
+        
+        try:
+            while True:
+                await self.run_cycle()
+                await asyncio.sleep(SCAN_INTERVAL)
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Bot stopped by user")
+            if self.gui:
+                self.gui.add_log("🛑 Bot stopped by user")
+            
+            # Send shutdown message
+            self.telegram.send_message_sync(
+                f"🤖 Ultimate Scalping Bot Shutdown\n"
+                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Total Cycles: {self.cycle_count}\n"
+                f"Total Signals: {self.signals_today}"
+            )
+            
+            if self.gui:
+                self.gui.add_log("📡 Shutdown message sent to Telegram")
+                
+        except Exception as e:
+            error_msg = f"❌ Bot error: {str(e)}"
+            print(error_msg)
+            traceback.print_exc()
+            if self.gui:
+                self.gui.add_log(error_msg)
+        finally:
+            print("💾 Cleanup completed")
 
 # =============================================
-# ULTIMATE GUI
+# SIMPLE GUI FOR THE BOT
 # =============================================
 
-class UltimateGUI:
-    """Ultimate GUI for scalping bot."""
+class SimpleScalpingGUI:
+    """Simple GUI for the scalping bot."""
     
     def __init__(self, bot):
         self.bot = bot
         self.root = tk.Tk()
-        self.root.title(f"⚡ ULTIMATE SCALPING BOT - {ANALYSIS_MODE}")
-        self.root.geometry("1400x900")
+        self.root.title("🤖 ULTIMATE SMART MONEY SCALPING BOT")
+        self.root.geometry("1200x800")
         
+        # Configure dark theme
         self.setup_styles()
         self.init_ui()
-        self.start_update_timer()
         
-        print("✅ Ultimate GUI initialized")
+        print("✅ Simple GUI initialized")
     
     def setup_styles(self):
-        """Setup ultimate styling."""
-        self.style = ttk.Style()
-        
-        bg_color = '#0a0a0a'
-        fg_color = '#00ff00'
-        panel_bg = '#1a1a1a'
-        accent_color = '#00ffff'
-        
-        self.root.configure(bg=bg_color)
-        
-        self.style.configure('Ultimate.TLabel', 
-                           background=bg_color, 
-                           foreground=accent_color,
-                           font=('Arial', 14, 'bold'))
-        
-        self.style.configure('Panel.TFrame', 
-                           background=panel_bg)
-        
-        self.style.configure('Metric.TLabel',
-                           background=panel_bg,
-                           foreground=fg_color,
-                           font=('Arial', 10))
-        
-        self.style.configure('Value.TLabel',
-                           background=panel_bg,
-                           foreground=accent_color,
-                           font=('Arial', 10, 'bold'))
+        """Setup styling."""
+        self.root.configure(bg='#0a0a0a')
     
     def init_ui(self):
-        """Initialize ultimate UI."""
+        """Initialize UI."""
         # Main container
-        main_container = ttk.Frame(self.root)
-        main_container.pack(fill='both', expand=True, padx=10, pady=10)
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill='both', expand=True)
         
-        # Top panel
-        top_panel = ttk.Frame(main_container)
-        top_panel.pack(fill='x', pady=(0, 10))
+        # Title
+        title_label = tk.Label(main_frame, 
+                              text="🤖 ULTIMATE SMART MONEY SCALPING BOT",
+                              font=('Arial', 16, 'bold'),
+                              bg='#0a0a0a', fg='#00ff00')
+        title_label.pack(pady=10)
         
-        # Left stats
-        left_stats = ttk.LabelFrame(top_panel, text="⚡ ULTIMATE STATS", padding=10)
-        left_stats.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        # Stats frame
+        stats_frame = ttk.LabelFrame(main_frame, text="📊 LIVE STATS", padding=10)
+        stats_frame.pack(fill='x', pady=10)
         
-        # Right stats
-        right_stats = ttk.LabelFrame(top_panel, text="📊 LIVE PERFORMANCE", padding=10)
-        right_stats.pack(side='right', fill='both', expand=True, padx=(5, 0))
-        
-        # Ultimate stats
-        self.metric_labels = {}
-        ultimate_stats = [
-            ("Total Pips:", "total_pips", "+0.0"),
-            ("Win Rate:", "win_rate", "0.0%"),
-            ("Win Streak:", "win_streak", "0"),
-            ("Active Scalps:", "active_scalps", "0"),
-            ("Avg Duration:", "avg_duration", "0.0m"),
-            ("Today's PnL:", "today_pnl", "$0.00")
+        # Stats labels
+        self.stats_labels = {}
+        stats_data = [
+            ("Cycles:", "cycles", "0"),
+            ("Signals Today:", "signals", "0"),
+            ("Active Trades:", "active_trades", "0"),
+            ("Daily PnL:", "daily_pnl", "0.00%"),
+            ("Daily Trades:", "daily_trades", "0/20")
         ]
         
-        for label, key, default in ultimate_stats:
-            row = ttk.Frame(left_stats)
-            row.pack(fill='x', pady=2)
+        for label_text, key, default in stats_data:
+            frame = ttk.Frame(stats_frame)
+            frame.pack(fill='x', pady=2)
             
-            ttk.Label(row, text=label, style='Metric.TLabel', width=20).pack(side='left')
-            self.metric_labels[key] = ttk.Label(row, text=default, style='Value.TLabel')
-            self.metric_labels[key].pack(side='right')
+            ttk.Label(frame, text=label_text, width=15).pack(side='left')
+            self.stats_labels[key] = ttk.Label(frame, text=default, 
+                                              font=('Arial', 10, 'bold'))
+            self.stats_labels[key].pack(side='right')
         
-        # Performance stats
-        perf_stats = [
-            ("BTC Price:", "btc_price", "$0.00"),
-            ("ETH Price:", "eth_price", "$0.00"),
-            ("Strategy:", "strategy", ANALYSIS_MODE),
-            ("Confidence:", "confidence", "0.0%"),
-            ("Last Signal:", "last_signal", "None"),
-            ("Telegram:", "telegram_status", "✅")
-        ]
-        
-        for label, key, default in perf_stats:
-            row = ttk.Frame(right_stats)
-            row.pack(fill='x', pady=2)
-            
-            ttk.Label(row, text=label, style='Metric.TLabel', width=20).pack(side='left')
-            self.metric_labels[key] = ttk.Label(row, text=default, style='Value.TLabel')
-            self.metric_labels[key].pack(side='right')
-        
-        # Middle panel
-        middle_panel = ttk.Frame(main_container)
-        middle_panel.pack(fill='both', expand=True, pady=(0, 10))
-        
-        # PnL Graph
-        pnl_frame = ttk.LabelFrame(middle_panel, text="📈 SCALPING PnL", padding=5)
-        pnl_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
-        
-        self.fig_pnl = Figure(figsize=(8, 4), dpi=80, facecolor='#1a1a1a')
-        self.ax_pnl = self.fig_pnl.add_subplot(111)
-        self.canvas_pnl = FigureCanvasTkAgg(self.fig_pnl, pnl_frame)
-        self.canvas_pnl.get_tk_widget().pack(fill='both', expand=True)
-        
-        # Win/Loss Graph
-        winloss_frame = ttk.LabelFrame(middle_panel, text="📊 WIN/LOSS HEATMAP", padding=5)
-        winloss_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
-        
-        self.fig_winloss = Figure(figsize=(8, 4), dpi=80, facecolor='#1a1a1a')
-        self.ax_winloss = self.fig_winloss.add_subplot(111)
-        self.canvas_winloss = FigureCanvasTkAgg(self.fig_winloss, winloss_frame)
-        self.canvas_winloss.get_tk_widget().pack(fill='both', expand=True)
-        
-        # Bottom panel
-        bottom_panel = ttk.Frame(main_container)
-        bottom_panel.pack(fill='both', expand=True)
-        
-        # Controls
-        control_frame = ttk.LabelFrame(bottom_panel, text="⚙️ ULTIMATE CONTROLS", padding=10)
-        control_frame.pack(side='left', fill='both', padx=(0, 5))
-        
-        # Strategy toggle
-        strategy_frame = ttk.Frame(control_frame)
-        strategy_frame.pack(pady=5)
-        
-        ttk.Label(strategy_frame, text="Strategy:", style='Metric.TLabel').pack(side='left', padx=(0, 5))
-        
-        self.strategy_var = tk.StringVar(value=ANALYSIS_MODE)
-        self.strategy_combo = ttk.Combobox(strategy_frame, textvariable=self.strategy_var, 
-                                         values=["SMART_MONEY", "FVG_MICROSTRUCTURE"], 
-                                         state='readonly', width=20)
-        self.strategy_combo.pack(side='left')
-        self.strategy_combo.bind('<<ComboboxSelected>>', self.on_strategy_change)
+        # Controls frame
+        controls_frame = ttk.LabelFrame(main_frame, text="⚙️ CONTROLS", padding=10)
+        controls_frame.pack(fill='x', pady=10)
         
         # Control buttons
-        self.start_btn = ttk.Button(control_frame, text="⚡ START ULTIMATE", 
+        self.start_btn = ttk.Button(controls_frame, text="▶️ START BOT", 
                                    command=self.start_bot, width=20)
         self.start_btn.pack(pady=5)
         
-        self.pause_btn = ttk.Button(control_frame, text="⏸️ PAUSE SCALPING", 
+        self.pause_btn = ttk.Button(controls_frame, text="⏸️ PAUSE BOT", 
                                    command=self.pause_bot, width=20,
                                    state='disabled')
         self.pause_btn.pack(pady=5)
         
-        ttk.Button(control_frame, text="🔄 SWITCH STRATEGY", 
-                  command=self.toggle_strategy, width=20).pack(pady=5)
-        
-        ttk.Button(control_frame, text="📡 TEST TELEGRAM", 
+        ttk.Button(controls_frame, text="📡 TEST TELEGRAM", 
                   command=self.test_telegram, width=20).pack(pady=5)
         
-        ttk.Button(control_frame, text="📊 REFRESH STATS", 
-                  command=self.refresh_stats, width=20).pack(pady=5)
-        
-        ttk.Button(control_frame, text="🗑️ CLEAR LOGS", 
+        ttk.Button(controls_frame, text="🗑️ CLEAR LOGS", 
                   command=self.clear_logs, width=20).pack(pady=5)
         
-        # Pairs info
-        pairs_frame = ttk.Frame(control_frame)
-        pairs_frame.pack(pady=10)
+        # Trading pairs info
+        pairs_frame = ttk.LabelFrame(main_frame, text="🎯 TRADING PAIRS", padding=10)
+        pairs_frame.pack(fill='x', pady=10)
         
-        ttk.Label(pairs_frame, text="🎯 SCALPING PAIRS:", style='Metric.TLabel').pack()
         for symbol in TRADING_PAIRS:
-            ttk.Label(pairs_frame, text=f"  {symbol}", 
-                     style='Value.TLabel').pack(anchor='w')
+            ttk.Label(pairs_frame, text=f"• {symbol}", 
+                     font=('Arial', 10)).pack(anchor='w')
         
-        # Risk info
-        risk_frame = ttk.Frame(control_frame)
-        risk_frame.pack(pady=5)
+        # Log frame
+        log_frame = ttk.LabelFrame(main_frame, text="📝 LIVE TRADING LOG", padding=5)
+        log_frame.pack(fill='both', expand=True, pady=10)
         
-        ttk.Label(risk_frame, text=f"⚖️ RISK PER TRADE: {RISK_PER_TRADE*100}%", 
-                 style='Value.TLabel').pack()
-        ttk.Label(risk_frame, text=f"🎯 MIN RRR: 1:2.5", style='Value.TLabel').pack()
-        ttk.Label(risk_frame, text=f"⏱️ MAX DURATION: {MAX_TRADE_DURATION//60}min", 
-                 style='Value.TLabel').pack()
-        
-        # Logs
-        log_frame = ttk.LabelFrame(bottom_panel, text="📝 ULTIMATE SCALPING LOG", padding=5)
-        log_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=12,
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=20,
                                                  font=('Consolas', 9),
                                                  bg='#0a0a0a', fg='#00ff00',
                                                  insertbackground='white')
@@ -1442,61 +1738,14 @@ class UltimateGUI:
         
         # Status bar
         self.status_bar = ttk.Label(self.root, 
-                                   text=f"⚡ ULTIMATE SCALPING BOT READY | {ANALYSIS_MODE} | Press START",
+                                   text="🤖 Ultimate Scalping Bot Ready | Press START",
                                    relief='sunken',
                                    anchor='center',
                                    font=('Arial', 10))
         self.status_bar.pack(side='bottom', fill='x')
         
-        # Initialize graphs
-        self.init_graphs()
-    
-    def init_graphs(self):
-        """Initialize graphs."""
-        self.ax_pnl.clear()
-        self.ax_pnl.set_facecolor('#1a1a1a')
-        self.ax_pnl.set_title('Scalping PnL Progression', color='white', pad=20)
-        self.ax_pnl.set_xlabel('Trade Sequence', color='white')
-        self.ax_pnl.set_ylabel('Cumulative PnL ($)', color='white')
-        self.ax_pnl.tick_params(colors='white')
-        self.ax_pnl.grid(True, alpha=0.3, color='gray')
-        
-        self.ax_winloss.clear()
-        self.ax_winloss.set_facecolor('#1a1a1a')
-        self.ax_winloss.set_title('Win/Loss Heatmap', color='white', pad=20)
-        self.ax_winloss.tick_params(colors='white')
-        
-        self.canvas_pnl.draw()
-        self.canvas_winloss.draw()
-    
-    def on_strategy_change(self, event=None):
-        """Handle strategy change."""
-        global ANALYSIS_MODE
-        ANALYSIS_MODE = self.strategy_var.get()
-        self.root.title(f"⚡ ULTIMATE SCALPING BOT - {ANALYSIS_MODE}")
-        self.add_log(f"🔄 Strategy changed to: {ANALYSIS_MODE}")
-    
-    def toggle_strategy(self):
-        """Toggle between strategies."""
-        current = self.strategy_var.get()
-        new = "FVG_MICROSTRUCTURE" if current == "SMART_MONEY" else "SMART_MONEY"
-        self.strategy_var.set(new)
-        self.on_strategy_change()
-    
-    def test_telegram(self):
-        """Test Telegram."""
-        self.add_log("📡 Testing Telegram...")
-        if self.bot.telegram.test_connection():
-            self.add_log("✅ Telegram is working!")
-            self.metric_labels['telegram_status'].config(text="✅")
-        else:
-            self.add_log("❌ Telegram test failed")
-            self.metric_labels['telegram_status'].config(text="❌")
-    
-    def refresh_stats(self):
-        """Refresh statistics."""
-        self.add_log("📊 Refreshing statistics...")
-        self.update_ui()
+        # Start update timer
+        self.start_update_timer()
     
     def start_update_timer(self):
         """Start update timer."""
@@ -1505,131 +1754,42 @@ class UltimateGUI:
         except Exception as e:
             print(f"⚠️ UI update error: {e}")
         finally:
-            self.root.after(3000, self.start_update_timer)  # Update every 3 seconds
+            self.root.after(2000, self.start_update_timer)
     
     def update_ui(self):
-        """Update UI."""
+        """Update UI with current stats."""
         try:
+            # Update status
             status = "RUNNING" if not self.bot.paused else "PAUSED"
-            strategy = self.strategy_var.get()
             
             self.status_bar.config(
-                text=f"⚡ {status} | {strategy} | "
+                text=f"🤖 {status} | "
                      f"Cycles: {self.bot.cycle_count} | "
                      f"Signals: {self.bot.signals_today} | "
-                     f"Active: {len(self.bot.trade_manager.active_trades)} | "
+                     f"Active Trades: {len(self.bot.trade_manager.active_trades)} | "
                      f"{datetime.now().strftime('%H:%M:%S')}"
             )
             
-            # Update prices
-            if USE_LIVE_DATA:
-                btc_price = self.bot.data_fetcher.get_live_price("BTC-USD")
-                eth_price = self.bot.data_fetcher.get_live_price("ETH-USD")
-                
-                if btc_price:
-                    self.metric_labels['btc_price'].config(text=f"${btc_price:.2f}")
-                if eth_price:
-                    self.metric_labels['eth_price'].config(text=f"${eth_price:.2f}")
-            
-            # Update stats from trade manager
-            stats = self.bot.trade_manager.scalping_stats
-            total_trades = stats['wins'] + stats['losses']
-            
-            if total_trades > 0:
-                win_rate = (stats['wins'] / total_trades) * 100
-                avg_duration = np.mean([t['duration'] for t in self.bot.trade_manager.trade_history]) if self.bot.trade_manager.trade_history else 0
-                total_pnl = sum(t['pnl'] for t in self.bot.trade_manager.trade_history)
-            else:
-                win_rate = 0
-                avg_duration = 0
-                total_pnl = 0
-            
-            self.metric_labels['total_pips'].config(text=f"{stats['total_pips']:+.1f}")
-            self.metric_labels['win_rate'].config(text=f"{win_rate:.1f}%")
-            self.metric_labels['win_streak'].config(text=str(abs(stats['current_streak']) if stats['current_streak'] > 0 else 0))
-            self.metric_labels['active_scalps'].config(text=str(len(self.bot.trade_manager.active_trades)))
-            self.metric_labels['avg_duration'].config(text=f"{avg_duration:.1f}m")
-            self.metric_labels['today_pnl'].config(text=f"${total_pnl:.4f}")
-            
-            # Update last signal
-            if self.bot.signal_generator.signal_history:
-                last_signal = self.bot.signal_generator.signal_history[-1]
-                self.metric_labels['last_signal'].config(
-                    text=f"{last_signal['symbol']} {last_signal['direction']}"
-                )
-                self.metric_labels['confidence'].config(
-                    text=f"{last_signal['confidence']:.1f}%"
-                )
-            
-            # Update graphs
-            pnl_data = [t['pnl'] for t in self.bot.trade_manager.trade_history]
-            self.update_pnl_graph(pnl_data)
-            
-            wins = stats['wins']
-            losses = stats['losses']
-            self.update_winloss_graph(wins, losses)
+            # Update stats
+            self.stats_labels['cycles'].config(text=str(self.bot.cycle_count))
+            self.stats_labels['signals'].config(text=str(self.bot.signals_today))
+            self.stats_labels['active_trades'].config(
+                text=str(len(self.bot.trade_manager.active_trades))
+            )
+            self.stats_labels['daily_pnl'].config(
+                text=f"{self.bot.trade_manager.daily_pnl:.2f}%"
+            )
+            self.stats_labels['daily_trades'].config(
+                text=f"{self.bot.trade_manager.daily_trades}/20"
+            )
             
         except Exception as e:
             print(f"⚠️ UI update error: {e}")
     
-    def update_pnl_graph(self, pnl_data: List[float]):
-        """Update PnL graph."""
-        self.ax_pnl.clear()
-        self.ax_pnl.set_facecolor('#1a1a1a')
-        
-        if pnl_data:
-            times = np.arange(len(pnl_data))
-            cumulative = np.cumsum(pnl_data)
-            
-            # Color based on profit/loss
-            colors = ['#00ff00' if p > 0 else '#ff4444' for p in pnl_data]
-            self.ax_pnl.bar(times, pnl_data, color=colors, alpha=0.7)
-            self.ax_pnl.plot(times, cumulative, 'w-', linewidth=2, alpha=0.8)
-            
-            # Mark breakeven line
-            self.ax_pnl.axhline(y=0, color='white', linestyle='--', alpha=0.3)
-        
-        self.ax_pnl.set_title('Scalping PnL Progression', color='white', pad=20)
-        self.ax_pnl.set_xlabel('Trade #', color='white')
-        self.ax_pnl.set_ylabel('PnL ($)', color='white')
-        self.ax_pnl.tick_params(colors='white')
-        self.ax_pnl.grid(True, alpha=0.2, color='gray')
-        
-        self.canvas_pnl.draw()
-    
-    def update_winloss_graph(self, wins: int, losses: int):
-        """Update win/loss graph."""
-        self.ax_winloss.clear()
-        self.ax_winloss.set_facecolor('#1a1a1a')
-        
-        if wins + losses > 0:
-            # Create heatmap-like visualization
-            data = np.array([[wins, 0], [0, losses]])
-            im = self.ax_winloss.imshow(data, cmap='RdYlGn', aspect='auto')
-            
-            # Add text labels
-            for i in range(2):
-                for j in range(2):
-                    if data[i, j] > 0:
-                        color = 'white' if data[i, j] > (wins + losses) / 4 else 'black'
-                        self.ax_winloss.text(j, i, f'{data[i, j]}', 
-                                           ha='center', va='center', 
-                                           color=color, fontsize=20, fontweight='bold')
-            
-            self.ax_winloss.set_xticks([0, 1])
-            self.ax_winloss.set_xticklabels(['Wins', 'Losses'], color='white')
-            self.ax_winloss.set_yticks([])
-            
-            # Add colorbar
-            plt.colorbar(im, ax=self.ax_winloss)
-        
-        self.ax_winloss.set_title('Win/Loss Heatmap', color='white', pad=20)
-        self.canvas_winloss.draw()
-    
     def add_log(self, message: str):
         """Add message to log."""
         try:
-            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            timestamp = datetime.now().strftime("%H:%M:%S")
             self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
             self.log_text.see(tk.END)
         except:
@@ -1648,167 +1808,26 @@ class UltimateGUI:
         self.bot.paused = False
         self.start_btn.config(state='disabled')
         self.pause_btn.config(state='normal')
-        self.add_log("⚡ ULTIMATE SCALPING BOT ACTIVATED")
-        self.add_log(f"🎯 Strategy: {self.strategy_var.get()}")
-        self.add_log(f"⚖️ Risk: {RISK_PER_TRADE*100}% per trade")
-        self.add_log(f"🎯 Target: 1:2.5+ RRR")
-        self.add_log(f"⏱️ Duration: 5-10 minute scalps")
-        self.add_log("📱 Telegram alerts: ACTIVE")
+        self.add_log("▶️ Ultimate Scalping Bot STARTED")
+        self.add_log(f"🎯 Strategy: {STRATEGY_MODE}")
+        self.add_log("🧠 Smart Money Concepts: ACTIVE")
+        self.add_log("📊 Market Microstructure: MONITORING")
+        self.add_log("🎯 Looking for high-probability setups...")
     
     def pause_bot(self):
         """Pause bot."""
         self.bot.paused = True
         self.start_btn.config(state='normal')
         self.pause_btn.config(state='disabled')
-        self.add_log("⏸️ Scalping PAUSED")
-        self.add_log("💾 Statistics saved")
-
-# =============================================
-# ULTIMATE SCALPING BOT
-# =============================================
-
-class UltimateScalpingBot:
-    """Ultimate scalping bot with Smart Money and Microstructure."""
+        self.add_log("⏸️ Bot PAUSED")
     
-    def __init__(self):
-        print("="*70)
-        print("⚡ ULTIMATE SCALPING BOT - SMART MONEY + MICROSTRUCTURE")
-        print("="*70)
-        
-        # Initialize Telegram
-        print("📡 Initializing Telegram...")
-        self.telegram = UltimateTelegramManager()
-        
-        # Initialize data fetcher
-        print("📊 Initializing data fetcher...")
-        self.data_fetcher = AdvancedDataFetcher()
-        
-        # Initialize analyzers
-        print("🧠 Initializing Smart Money analyzer...")
-        self.smart_money = SmartMoneyAnalyzer(self.data_fetcher)
-        
-        print("⚡ Initializing Microstructure analyzer...")
-        self.microstructure = MicrostructureAnalyzer(self.data_fetcher)
-        
-        # Initialize signal generator
-        print("🎯 Initializing Ultimate signal generator...")
-        self.signal_generator = UltimateSignalGenerator(
-            self.smart_money, self.microstructure, self.telegram
-        )
-        
-        # Initialize trade manager
-        print("💰 Initializing Ultimate trade manager...")
-        self.trade_manager = UltimateTradeManager(self.telegram)
-        
-        # State
-        self.cycle_count = 0
-        self.signals_today = 0
-        self.paused = True
-        self.gui = None
-        
-        print("✅ Ultimate Scalping Bot initialized!")
-        print(f"   • Strategy: {ANALYSIS_MODE}")
-        print(f"   • Risk per trade: {RISK_PER_TRADE*100}%")
-        print(f"   • Minimum RRR: 1:2.5")
-        print(f"   • Max duration: {MAX_TRADE_DURATION//60} minutes")
-        print(f"   • Pairs: {', '.join(TRADING_PAIRS)}")
-        print(f"   • Telegram: @TheUltimateScalperBot")
-        print("="*70)
-    
-    def set_gui(self, gui):
-        """Set GUI."""
-        self.gui = gui
-        self.gui.add_log("⚡ ULTIMATE SCALPING BOT READY")
-        self.gui.add_log(f"🎯 Strategy: {ANALYSIS_MODE}")
-        self.gui.add_log(f"📱 Telegram: @TheUltimateScalperBot")
-        self.gui.add_log(f"⚖️ Risk: {RISK_PER_TRADE*100}% per trade")
-        self.gui.add_log(f"🎯 Target RRR: 1:2.5+")
-        self.gui.add_log(f"⏱️ Scalp duration: 5-10 minutes")
-        self.gui.add_log("Press START to begin ultimate scalping!")
-    
-    async def run_cycle(self):
-        """Run one scalping cycle."""
-        if self.paused:
-            return
-        
-        self.cycle_count += 1
-        
-        if self.gui:
-            self.gui.add_log(f"\n⚡ CYCLE {self.cycle_count} - {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-        
-        try:
-            # Monitor existing trades
-            await self.trade_manager.monitor_trades(self.data_fetcher, 
-                                                   self.gui.add_log if self.gui else print)
-            
-            # Generate signals for each symbol
-            for symbol in TRADING_PAIRS:
-                # Check max trades per symbol
-                active_for_symbol = sum(
-                    1 for trade in self.trade_manager.active_trades.values()
-                    if trade['signal']['symbol'] == symbol
-                )
-                
-                if active_for_symbol >= 1:
-                    continue
-                
-                # Generate ultimate signal
-                signal = await self.signal_generator.generate_ultimate_signal(
-                    symbol,
-                    self.gui.add_log if self.gui else print
-                )
-                
-                # Execute if valid
-                if signal:
-                    if await self.trade_manager.execute_trade(signal, self.gui.add_log if self.gui else print):
-                        self.signals_today += 1
-                        
-        except Exception as e:
-            error_msg = f"❌ Cycle error: {str(e)}"
-            if self.gui:
-                self.gui.add_log(error_msg)
-            else:
-                print(error_msg)
-        
-        if self.gui:
-            self.gui.add_log(f"✅ Cycle {self.cycle_count} completed")
-    
-    async def run(self):
-        """Main loop."""
-        print("🚀 Starting Ultimate Scalping Bot...")
-        print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        if self.gui:
-            self.gui.add_log("✅ All systems initialized")
-            self.gui.add_log("✅ Smart Money analyzer ready")
-            self.gui.add_log("✅ Microstructure analyzer ready")
-            self.gui.add_log("✅ Telegram notifications active")
-        
-        try:
-            while True:
-                await self.run_cycle()
-                await asyncio.sleep(SCAN_INTERVAL)
-                
-        except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user")
-            if self.gui:
-                self.gui.add_log("🛑 Ultimate Scalping stopped")
-                self.gui.add_log("💾 Statistics saved")
-            
-            # Send shutdown message
-            self.telegram.send_message_sync(
-                f"🛑 Ultimate Scalping Bot Shutdown\n"
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Total Cycles: {self.cycle_count}\n"
-                f"Total Signals: {self.signals_today}\n"
-                f"Total Pips: {self.trade_manager.scalping_stats['total_pips']:+.1f}"
-            )
-                
-        except Exception as e:
-            error_msg = f"❌ Bot error: {str(e)}"
-            print(error_msg)
-            if self.gui:
-                self.gui.add_log(error_msg)
+    def test_telegram(self):
+        """Test Telegram."""
+        self.add_log("📡 Testing Telegram...")
+        if self.bot.telegram.test_connection():
+            self.add_log("✅ Telegram is working!")
+        else:
+            self.add_log("❌ Telegram test failed")
 
 # =============================================
 # MAIN ENTRY POINT
@@ -1819,7 +1838,7 @@ def main():
     bot = UltimateScalpingBot()
     
     # Create GUI
-    gui = UltimateGUI(bot)
+    gui = SimpleScalpingGUI(bot)
     bot.set_gui(gui)
     
     # Run bot in thread
@@ -1828,6 +1847,7 @@ def main():
             asyncio.run(bot.run())
         except Exception as e:
             print(f"❌ Bot thread error: {e}")
+            traceback.print_exc()
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
@@ -1837,52 +1857,53 @@ def main():
         gui.root.mainloop()
     except Exception as e:
         print(f"❌ GUI error: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("⚡ ULTIMATE SCALPING BOT - SMART MONEY + MICROSTRUCTURE")
+    print("🤖 ULTIMATE SMART MONEY SCALPING BOT")
     print("="*70)
-    print(f"\n🎯 STRATEGY: {ANALYSIS_MODE}")
     
     print("\n🚀 ULTIMATE FEATURES:")
-    print("1. 🧠 SMART MONEY CONCEPTS: Order Blocks, FVGs, Liquidity")
-    print("2. ⚡ MARKET MICROSTRUCTURE: Order flow, Supply/Demand zones")
-    print("3. 🎯 BREAK OF STRUCTURE (BOS) detection")
-    print("4. 💧 LIQUIDITY SWEEP identification")
-    print("5. ⚖️ ULTRA-TIGHT RISK: 1% per trade, 1:2.5+ RRR")
-    print("6. ⏱️ FAST SCALPING: 5-10 minute trades")
-    print("7. 📱 INSTANT TELEGRAM: Real-time alerts")
+    print("1. 🧠 SMART MONEY CONCEPTS (SMC)")
+    print("   • Fair Value Gaps (FVGs)")
+    print("   • Order Blocks (OBs)")
+    print("   • Breaker Blocks")
+    print("   • Market Structure Analysis")
     
-    print("\n🧠 SMART MONEY COMPONENTS:")
-    print("• Order Blocks (OB): Market structure shifts")
-    print("• Fair Value Gaps (FVG): Price imbalances")
-    print("• Liquidity Pools: Previous swing highs/lows")
-    print("• Break of Structure (BOS): Trend continuation")
-    print("• Change of Character (CHOCH): Trend reversal")
+    print("\n2. 📊 MARKET MICROSTRUCTURE")
+    print("   • Order Flow Analysis")
+    print("   • Liquidity Pool Detection")
+    print("   • Bid/Ask Imbalance")
+    print("   • Volume Profile")
     
-    print("\n⚡ MICROSTRUCTURE COMPONENTS:")
-    print("• Order Flow Imbalance: Buying vs Selling pressure")
-    print("• Supply/Demand Zones: Immediate rejection areas")
-    print("• Absorption Detection: Large volume without movement")
-    print("• Momentum Acceleration: Speed of price movement")
+    print("\n3. 📡 REAL-TIME DATA")
+    print("   • Binance Futures API")
+    print("   • CoinGecko API")
+    print("   • Multi-timeframe Analysis (1m/5m/15m)")
+    
+    print("\n4. ⚡ ADVANCED SCALPING")
+    print("   • Ultra-fast 5-second scanning")
+    print("   • Trailing Stops")
+    print("   • Partial Take Profits")
+    print("   • Position Scaling")
+    print("   • Daily Risk Limits")
     
     print("\n🎯 TRADING PARAMETERS:")
-    print(f"• Strategy: {ANALYSIS_MODE}")
-    print(f"• Risk per trade: {RISK_PER_TRADE*100}%")
-    print(f"• Minimum RRR: 1:2.5")
-    print(f"• Max trade duration: {MAX_TRADE_DURATION//60} minutes")
-    print(f"• Scan interval: {SCAN_INTERVAL} seconds")
-    print(f"• Minimum confidence: {MIN_CONFIDENCE}%")
+    print(f"• Strategy: {STRATEGY_MODE}")
+    print(f"• Pairs: {', '.join(TRADING_PAIRS)}")
+    print(f"• Risk per Trade: {RISK_PER_TRADE*100}%")
+    print(f"• Max Daily Risk: {MAX_DAILY_RISK*100}%")
+    print(f"• Minimum Confidence: {MIN_CONFIDENCE}%")
+    print(f"• Minimum RRR: 1:1.5")
     
-    print("\n📡 TELEGRAM:")
+    print("\n📡 TELEGRAM BOT:")
     print(f"• Bot: @TheUltimateScalperBot")
-    print(f"• Chat ID: {TELEGRAM_CHAT_ID}")
     
-    print("\n🔄 CONTROLS:")
-    print("• START ULTIMATE: Begin scalping")
-    print("• SWITCH STRATEGY: Toggle between Smart Money and FVG+Microstructure")
-    print("• TEST TELEGRAM: Verify notifications")
-    print("• REFRESH STATS: Update performance metrics")
+    print("\n⚠️ IMPORTANT:")
+    print("• Add your Binance API keys for full functionality")
+    print("• Start with small position sizes")
+    print("• Monitor performance closely")
     print("="*70 + "\n")
     
     main()
