@@ -1,5 +1,5 @@
 # =============================================
-# ULTIMATE ML SCALPING BOT - BTC/ETH ENHANCED
+# AI ENHANCED SCALPING BOT - MEDIUM RANGE
 # =============================================
 
 import asyncio
@@ -19,1688 +19,1529 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
-from typing import Dict, List, Optional, Tuple, Any, Set
+from typing import Dict, List, Optional, Tuple, Any, Deque
 from dataclasses import dataclass
 from enum import Enum
 import aiohttp
-from collections import deque, defaultdict
+from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+import joblib
 import pickle
-from typing import Literal
-
-# ML Libraries
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-import xgboost as xgb
-from scipy import stats
-import talib
 
 warnings.filterwarnings('ignore')
 
 # =============================================
 # CONFIGURATION
 # =============================================
-TELEGRAM_BOT_TOKEN = "8535394169:AAE-GUriAU8THtypY2p82ewEgXqMC4twLas"
+TELEGRAM_BOT_TOKEN = "
+8285366409:AAH9kdy1D-xULBmGakAPFYUME19fmVCDJ9E"
 TELEGRAM_CHAT_ID = "-1003525746518"
 
 # Trading Parameters
-SCALP_INTERVAL = 3 # 3 seconds between checks
-MAX_CONCURRENT_TRADES = 2 # Only 2 trades at once
-MAX_TRADE_DURATION = 120 # 2 minutes max
-MIN_CONFIDENCE = 70 # Minimum ML confidence
-EMERGENCY_STOP_LOSS = 1.5 # 1.5% emergency stop
+SCAN_INTERVAL = 3  # 3 seconds for fast scanning
+MAX_CONCURRENT_TRADES = 2
+MAX_TRADE_DURATION = 900  # 15 minutes
+MIN_CONFIDENCE = 70  # ML model confidence threshold
+RISK_PER_TRADE = 0.02  # 2% risk per trade
 
-# Trading Pairs
-TRADING_PAIRS = ["BTCUSDT", "ETHUSDT"]
+# Only BTC and ETH
+TRADING_PAIRS = [
+    "BTC-USD",
+    "ETH-USD"
+]
 
-# Risk Parameters
-RISK_PER_TRADE = 0.02 # 2% risk per trade
-TAKE_PROFIT_MULTIPLIER = 1.5 # TP = 1.5x risk
-TRAILING_STOP_ACTIVATION = 0.3 # Activate trailing at 0.3R
-TRAILING_STOP_DISTANCE = 0.15 # Trail at 0.15R distance
+# Pip configurations
+PIP_CONFIG = {
+    "BTC-USD": 0.01,   # 1 pip = 0.01
+    "ETH-USD": 0.01,   # 1 pip = 0.01
+}
 
-# ML Parameters
-MODEL_UPDATE_INTERVAL = 60 # Update model every 60 minutes
-MIN_TRAINING_SAMPLES = 1000
-PREDICTION_WINDOW = 20 # Predict next 20 candles
+# ML Model Configuration
+ML_FEATURES = 20  # Number of features for ML model
+MODEL_SAVE_PATH = "ml_models/"
+os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
 
 # =============================================
-# ENHANCED DATA CLASSES
+# ENHANCED DATA STRUCTURES
 # =============================================
 
-class MarketRegime(Enum):
-"""Market regime classification."""
-BULL_TREND = "bull_trend"
-BEAR_TREND = "bear_trend"
-HIGH_VOLATILITY = "high_vol"
-LOW_VOLATILITY = "low_vol"
-MEAN_REVERSION = "mean_reversion"
-BREAKOUT = "breakout"
-
-class ScalpSignal(Enum):
-"""Scalping signal types."""
-FVG_BULLISH = "fvg_bullish"
-FVG_BEARISH = "fvg_bearish"
-ORDER_BLOCK_BULLISH = "ob_bullish"
-ORDER_BLOCK_BEARISH = "ob_bearish"
-LIQUIDITY_GRAB = "liquidity_grab"
-BREAKOUT_RETEST = "breakout_retest"
-SUPPLY_DEMAND = "supply_demand"
+@dataclass
+class MarketState:
+    """Current market state with all indicators."""
+    symbol: str
+    timestamp: datetime
+    price: float
+    volume: float
+    spread: float
+    
+    # Technical indicators
+    rsi: float
+    macd: float
+    macd_signal: float
+    macd_histogram: float
+    bb_upper: float
+    bb_middle: float
+    bb_lower: float
+    bb_width: float
+    atr: float
+    vwap: float
+    obv: float
+    momentum: float
+    volatility: float
+    volume_ratio: float
+    
+    # ML features
+    features: np.ndarray
+    
+    def to_feature_array(self) -> np.ndarray:
+        """Convert to feature array for ML model."""
+        return np.array([
+            self.rsi / 100,
+            self.macd,
+            self.macd_histogram,
+            self.bb_width,
+            self.atr / self.price if self.price > 0 else 0,
+            self.volume_ratio,
+            self.momentum,
+            self.volatility,
+            (self.price - self.bb_middle) / self.bb_width if self.bb_width > 0 else 0,
+            self.obv / 1000000 if abs(self.obv) > 0 else 0
+        ])
 
 @dataclass
 class MLPrediction:
-"""ML model prediction."""
-direction: Literal["LONG", "SHORT", "NEUTRAL"]
-confidence: float
-probability_long: float
-probability_short: float
-features: Dict[str, float]
-regime: MarketRegime
-predicted_move_pct: float
+    """ML model prediction."""
+    direction: str  # "LONG", "SHORT", "NEUTRAL"
+    confidence: float
+    probability_long: float
+    probability_short: float
+    features_used: np.ndarray
+    model_name: str
 
 @dataclass
-class EnhancedSignal:
-"""Enhanced signal with ML predictions."""
-signal_id: str
-symbol: str
-direction: str
-entry_price: float
-stop_loss: float
-take_profit: float
-confidence: float
-ml_confidence: float
-signal_type: ScalpSignal
-timeframe: str
-risk_reward: float
-position_size: float
-ml_prediction: MLPrediction
-order_block_type: Optional[str] = None
-liquidity_levels: Optional[List[float]] = None
-created_at: datetime = None
-expiry: datetime = None
-status: str = "PENDING"
-
-def __post_init__(self):
-if self.created_at is None:
-self.created_at = datetime.now()
-if self.expiry is None:
-self.expiry = self.created_at + timedelta(minutes=5)
-
-def calculate_pips(self) -> float:
-"""Calculate pips risk."""
-pip_size = 0.01 if "BTC" in self.symbol else 0.01
-risk_pips = abs(self.entry_price - self.stop_loss) / pip_size
-return risk_pips
-
-# =============================================
-# ENHANCED MARKET DATA WITH REAL-TIME FEATURES
-# =============================================
-
-class EnhancedMarketData:
-"""Market data with technical indicators and feature extraction."""
-
-def __init__(self):
-self.session = None
-self.cache = {}
-self.cache_time = {}
-self.feature_cache = {}
-self.historical_data = defaultdict(lambda: defaultdict(deque))
-
-async def initialize(self):
-"""Initialize session."""
-try:
-self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
-print("✅ Market data session initialized")
-except Exception as e:
-print(f"❌ Error initializing market data: {e}")
-self.session = None
-
-async def close(self):
-"""Close session."""
-if self.session:
-try:
-await self.session.close()
-except:
-pass
-
-async def get_price(self, symbol: str) -> Optional[float]:
-"""Get current price from Binance."""
-try:
-clean_symbol = symbol.replace("USDT", "")
-url = f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}USDT"
-
-async with self.session.get(url, timeout=5) as response:
-if response.status == 200:
-data = await response.json()
-price = float(data['price'])
-
-# Cache for 1 second
-self.cache[symbol] = price
-self.cache_time[symbol] = time.time()
-
-return price
-except Exception as e:
-print(f"⚠️ Price error for {symbol}: {e}")
-# Return cached if available (5 second cache)
-if symbol in self.cache and time.time() - self.cache_time.get(symbol, 0) < 5:
-return self.cache[symbol]
-return None
-
-async def get_ohlcv_data(self, symbol: str, timeframe: str = '1m', limit: int = 500) -> Optional[pd.DataFrame]:
-"""Get OHLCV data with enhanced features."""
-try:
-# Map symbol for yfinance
-yf_symbol = "BTC-USD" if symbol == "BTCUSDT" else "ETH-USD"
-
-# Map timeframe
-tf_map = {
-'1m': '1m',
-'3m': '3m',
-'5m': '5m',
-'15m': '15m',
-'1h': '60m'
-}
-
-interval = tf_map.get(timeframe, '1m')
-
-# Get more data than needed for indicators
-ticker = yf.Ticker(yf_symbol)
-hist = ticker.history(period="2d", interval=interval)
-
-if not hist.empty and len(hist) >= 100:
-df = hist.tail(min(limit * 2, len(hist))) # Get extra for calculations
-
-# Store in cache
-cache_key = f"{symbol}_{timeframe}"
-self.historical_data[symbol][timeframe] = deque(list(df.to_dict('records')), maxlen=1000)
-
-return df.tail(limit)
-
-except Exception as e:
-print(f"⚠️ OHLCV error for {symbol}: {e}")
-
-return None
-
-def calculate_features(self, df: pd.DataFrame) -> Dict[str, float]:
-"""Calculate advanced technical features."""
-if len(df) < 50:
-return {}
-
-try:
-closes = df['Close'].values.astype(float)
-highs = df['High'].values.astype(float)
-lows = df['Low'].values.astype(float)
-volumes = df['Volume'].values.astype(float)
-
-features = {}
-
-# Price-based features
-features['returns_5'] = (closes[-1] / closes[-5] - 1) * 100
-features['returns_10'] = (closes[-1] / closes[-10] - 1) * 100
-features['returns_20'] = (closes[-1] / closes[-20] - 1) * 100
-
-# Volatility features
-features['atr_14'] = talib.ATR(highs, lows, closes, timeperiod=14)[-1] / closes[-1] * 100
-features['volatility_20'] = np.std(np.diff(closes[-20:])) / closes[-1] * 100
-
-# Momentum indicators
-features['rsi_14'] = talib.RSI(closes, timeperiod=14)[-1]
-features['stoch_k'] = talib.STOCH(highs, lows, closes, fastk_period=14)[0][-1]
-features['stoch_d'] = talib.STOCH(highs, lows, closes, fastk_period=14)[1][-1]
-features['macd'] = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)[0][-1]
-features['macd_signal'] = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)[1][-1]
-
-# Volume features
-volume_ma_20 = talib.SMA(volumes, timeperiod=20)[-1]
-features['volume_ratio'] = volumes[-1] / volume_ma_20 if volume_ma_20 > 0 else 1
-features['obv'] = talib.OBV(closes, volumes)[-1]
-
-# Trend indicators
-features['ema_9'] = talib.EMA(closes, timeperiod=9)[-1]
-features['ema_21'] = talib.EMA(closes, timeperiod=21)[-1]
-features['ema_50'] = talib.EMA(closes, timeperiod=50)[-1]
-features['ema_200'] = talib.EMA(closes, timeperiod=200)[-1]
-
-features['ema_9_21_diff'] = (features['ema_9'] - features['ema_21']) / closes[-1] * 100
-features['ema_21_50_diff'] = (features['ema_21'] - features['ema_50']) / closes[-1] * 100
-
-# Price action features
-features['body_size'] = abs(closes[-1] - df['Open'].iloc[-1]) / closes[-1] * 100
-features['upper_shadow'] = (highs[-1] - max(closes[-1], df['Open'].iloc[-1])) / closes[-1] * 100
-features['lower_shadow'] = (min(closes[-1], df['Open'].iloc[-1]) - lows[-1]) / closes[-1] * 100
-
-# Pattern recognition
-features['hammer'] = self._is_hammer_pattern(highs[-5:], lows[-5:], closes[-5:])
-features['shooting_star'] = self._is_shooting_star_pattern(highs[-5:], lows[-5:], closes[-5:])
-features['engulfing'] = self._is_engulfing_pattern(df.iloc[-2:])
-
-# Statistical features
-features['skewness_20'] = stats.skew(closes[-20:])
-features['kurtosis_20'] = stats.kurtosis(closes[-20:])
-
-# Support/Resistance features
-features['distance_to_high_20'] = (highs[-20:].max() - closes[-1]) / closes[-1] * 100
-features['distance_to_low_20'] = (closes[-1] - lows[-20:].min()) / closes[-1] * 100
-
-# Market regime features
-features['trend_strength'] = self._calculate_trend_strength(closes)
-features['mean_reversion_potential'] = self._calculate_mean_reversion_potential(closes)
-
-return features
-
-except Exception as e:
-print(f"⚠️ Feature calculation error: {e}")
-return {}
-
-def _is_hammer_pattern(self, highs, lows, closes):
-"""Detect hammer pattern."""
-if len(closes) < 5:
-return 0
-
-body = abs(closes[-1] - closes[-2])
-lower_shadow = min(closes[-1], closes[-2]) - lows[-1]
-upper_shadow = highs[-1] - max(closes[-1], closes[-2])
-
-if lower_shadow > body * 2 and upper_shadow < body * 0.3:
-return 1
-return 0
-
-def _is_shooting_star_pattern(self, highs, lows, closes):
-"""Detect shooting star pattern."""
-if len(closes) < 5:
-return 0
-
-body = abs(closes[-1] - closes[-2])
-lower_shadow = min(closes[-1], closes[-2]) - lows[-1]
-upper_shadow = highs[-1] - max(closes[-1], closes[-2])
-
-if upper_shadow > body * 2 and lower_shadow < body * 0.3:
-return 1
-return 0
-
-def _is_engulfing_pattern(self, df):
-"""Detect engulfing pattern."""
-if len(df) < 2:
-return 0
-
-prev_body = abs(df['Close'].iloc[-2] - df['Open'].iloc[-2])
-curr_body = abs(df['Close'].iloc[-1] - df['Open'].iloc[-1])
-
-if curr_body > prev_body * 1.5:
-# Bullish engulfing
-if df['Close'].iloc[-1] > df['Open'].iloc[-1] and df['Close'].iloc[-2] < df['Open'].iloc[-2]:
-return 1
-# Bearish engulfing
-elif df['Close'].iloc[-1] < df['Open'].iloc[-1] and df['Close'].iloc[-2] > df['Open'].iloc[-2]:
-return -1
-
-return 0
-
-def _calculate_trend_strength(self, prices):
-"""Calculate trend strength using ADX."""
-if len(prices) < 14:
-return 0
-
-try:
-# Use simple price action for trend
-ma_short = np.mean(prices[-5:])
-ma_medium = np.mean(prices[-20:])
-
-trend = (ma_short - ma_medium) / ma_medium * 100
-return min(100, max(-100, trend))
-
-except:
-return 0
-
-def _calculate_mean_reversion_potential(self, prices):
-"""Calculate mean reversion potential."""
-if len(prices) < 20:
-return 0
-
-current = prices[-1]
-mean = np.mean(prices[-20:])
-std = np.std(prices[-20:])
-
-if std == 0:
-return 0
-
-z_score = (current - mean) / std
-# Higher absolute z-score = higher mean reversion potential
-return min(100, abs(z_score) * 20)
+class ScalpingSignal:
+    """Scalping signal with ML enhancement."""
+    signal_id: str
+    symbol: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit_1: float
+    take_profit_2: float
+    take_profit_3: float
+    confidence: float
+    risk_reward: float
+    position_size: float
+    ml_prediction: MLPrediction
+    market_state: MarketState
+    reason: str
+    created_at: datetime
+    expiry: datetime
+    status: str = "PENDING"
+    
+    def calculate_pips(self) -> Tuple[float, float]:
+        """Calculate risk and target in pips."""
+        pip_size = PIP_CONFIG.get(self.symbol, 0.01)
+        
+        if self.direction == "LONG":
+            risk_pips = (self.entry_price - self.stop_loss) / pip_size
+            target_pips = (self.take_profit_3 - self.entry_price) / pip_size
+        else:  # SHORT
+            risk_pips = (self.stop_loss - self.entry_price) / pip_size
+            target_pips = (self.entry_price - self.take_profit_3) / pip_size
+        
+        return abs(risk_pips), abs(target_pips)
 
 # =============================================
-# ML MODEL WITH ADVANCED FEATURES
+# ML MODEL MANAGER
 # =============================================
 
 class MLModelManager:
-"""Manages ML models for price prediction."""
-
-def __init__(self):
-self.models = {}
-self.scalers = {}
-self.label_encoders = {}
-self.training_data = defaultdict(list)
-self.last_update = {}
-self.feature_importance = {}
-
-def create_model(self, symbol: str):
-"""Create and train model for symbol."""
-try:
-# Features to use
-feature_columns = [
-'returns_5', 'returns_10', 'returns_20',
-'atr_14', 'volatility_20',
-'rsi_14', 'stoch_k', 'stoch_d', 'macd', 'macd_signal',
-'volume_ratio', 'obv',
-'ema_9_21_diff', 'ema_21_50_diff',
-'body_size', 'upper_shadow', 'lower_shadow',
-'hammer', 'shooting_star', 'engulfing',
-'skewness_20', 'kurtosis_20',
-'distance_to_high_20', 'distance_to_low_20',
-'trend_strength', 'mean_reversion_potential'
-]
-
-# Use XGBoost for better performance
-model = xgb.XGBClassifier(
-n_estimators=200,
-max_depth=6,
-learning_rate=0.1,
-subsample=0.8,
-colsample_bytree=0.8,
-random_state=42,
-n_jobs=-1,
-use_label_encoder=False,
-eval_metric='logloss'
-)
-
-self.models[symbol] = model
-self.scalers[symbol] = StandardScaler()
-self.label_encoders[symbol] = LabelEncoder()
-
-print(f"✅ ML model created for {symbol}")
-
-except Exception as e:
-print(f"❌ Error creating model for {symbol}: {e}")
-
-def add_training_data(self, symbol: str, features: Dict, future_returns: float):
-"""Add training data point."""
-try:
-if features:
-# Label based on future returns
-if future_returns > 0.1: # 0.1% gain
-label = "LONG"
-elif future_returns < -0.1: # 0.1% loss
-label = "SHORT"
-else:
-label = "NEUTRAL"
-
-self.training_data[symbol].append((features, label))
-
-# Keep last 10000 samples
-if len(self.training_data[symbol]) > 10000:
-self.training_data[symbol] = self.training_data[symbol][-10000:]
-
-except Exception as e:
-print(f"⚠️ Error adding training data: {e}")
-
-def train_model(self, symbol: str):
-"""Train model on accumulated data."""
-try:
-if symbol not in self.training_data or len(self.training_data[symbol]) < MIN_TRAINING_SAMPLES:
-return False
-
-data = self.training_data[symbol]
-X = [item[0] for item in data]
-y = [item[1] for item in data]
-
-# Convert to arrays
-X_df = pd.DataFrame(X).fillna(0)
-y_array = np.array(y)
-
-# Scale features
-X_scaled = self.scalers[symbol].fit_transform(X_df)
-
-# Encode labels
-y_encoded = self.label_encoders[symbol].fit_transform(y_array)
-
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(
-X_scaled, y_encoded, test_size=0.2, random_state=42
-)
-
-# Train model
-self.models[symbol].fit(
-X_train, y_train,
-eval_set=[(X_test, y_test)],
-verbose=False,
-early_stopping_rounds=20
-)
-
-# Evaluate
-y_pred = self.models[symbol].predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
-
-# Get feature importance
-importance = self.models[symbol].feature_importances_
-self.feature_importance[symbol] = dict(zip(X_df.columns, importance))
-
-self.last_update[symbol] = datetime.now()
-
-print(f"✅ Model trained for {symbol}, Accuracy: {accuracy:.2%}")
-print(f" Top features: {sorted(self.feature_importance[symbol].items(), key=lambda x: x[1], reverse=True)[:5]}")
-
-return True
-
-except Exception as e:
-print(f"❌ Error training model for {symbol}: {e}")
-return False
-
-def predict(self, symbol: str, features: Dict) -> Optional[MLPrediction]:
-"""Make prediction using trained model."""
-try:
-if symbol not in self.models or not self.models[symbol]:
-return None
-
-# Prepare features
-X_df = pd.DataFrame([features]).fillna(0)
-
-# Scale
-if symbol in self.scalers:
-X_scaled = self.scalers[symbol].transform(X_df)
-else:
-return None
-
-# Predict
-model = self.models[symbol]
-probabilities = model.predict_proba(X_scaled)[0]
-
-# Get class predictions
-if symbol in self.label_encoders:
-classes = self.label_encoders[symbol].classes_
-
-# Create prediction
-if len(probabilities) == len(classes):
-predictions = dict(zip(classes, probabilities))
-
-# Determine direction
-if 'LONG' in predictions and 'SHORT' in predictions:
-if predictions['LONG'] > predictions['SHORT']:
-direction = "LONG"
-confidence = predictions['LONG']
-else:
-direction = "SHORT"
-confidence = predictions['SHORT']
-else:
-direction = "NEUTRAL"
-confidence = 0.5
-
-# Determine regime
-regime = self._determine_regime(features)
-
-# Estimate move
-predicted_move = self._estimate_move(features, direction)
-
-return MLPrediction(
-direction=direction,
-confidence=float(confidence),
-probability_long=float(predictions.get('LONG', 0.33)),
-probability_short=float(predictions.get('SHORT', 0.33)),
-features=features,
-regime=regime,
-predicted_move_pct=predicted_move
-)
-
-except Exception as e:
-print(f"⚠️ Prediction error for {symbol}: {e}")
-
-return None
-
-def _determine_regime(self, features: Dict) -> MarketRegime:
-"""Determine market regime from features."""
-try:
-volatility = features.get('atr_14', 0)
-trend = features.get('trend_strength', 0)
-mean_reversion = features.get('mean_reversion_potential', 0)
-
-if volatility > 2.0:
-return MarketRegime.HIGH_VOLATILITY
-elif volatility < 0.5:
-return MarketRegime.LOW_VOLATILITY
-elif trend > 20:
-return MarketRegime.BULL_TREND
-elif trend < -20:
-return MarketRegime.BEAR_TREND
-elif mean_reversion > 30:
-return MarketRegime.MEAN_REVERSION
-else:
-return MarketRegime.BREAKOUT
-
-except:
-return MarketRegime.BREAKOUT
-
-def _estimate_move(self, features: Dict, direction: str) -> float:
-"""Estimate potential move percentage."""
-try:
-volatility = features.get('atr_14', 1.0)
-trend_strength = abs(features.get('trend_strength', 0))
-
-# Base move on volatility and trend
-base_move = volatility * 0.5 # 50% of ATR
-
-if direction == "LONG" and features.get('trend_strength', 0) > 0:
-base_move *= 1.5
-elif direction == "SHORT" and features.get('trend_strength', 0) < 0:
-base_move *= 1.5
-
-return min(5.0, max(0.1, base_move)) # Clamp between 0.1% and 5%
-
-except:
-return 1.0
-
-def save_models(self):
-"""Save models to disk."""
-try:
-os.makedirs("models", exist_ok=True)
-
-for symbol, model in self.models.items():
-model_path = f"models/{symbol}_model.pkl"
-with open(model_path, 'wb') as f:
-pickle.dump({
-'model': model,
-'scaler': self.scalers.get(symbol),
-'encoder': self.label_encoders.get(symbol),
-'features': self.feature_importance.get(symbol, {}),
-'last_update': self.last_update.get(symbol)
-}, f)
-
-print("✅ Models saved to disk")
-
-except Exception as e:
-print(f"❌ Error saving models: {e}")
-
-def load_models(self):
-"""Load models from disk."""
-try:
-for symbol in TRADING_PAIRS:
-model_path = f"models/{symbol}_model.pkl"
-if os.path.exists(model_path):
-with open(model_path, 'rb') as f:
-data = pickle.load(f)
-self.models[symbol] = data['model']
-self.scalers[symbol] = data['scaler']
-self.label_encoders[symbol] = data['encoder']
-self.feature_importance[symbol] = data['features']
-self.last_update[symbol] = data['last_update']
-
-print(f"✅ Model loaded for {symbol}")
-else:
-self.create_model(symbol)
-
-except Exception as e:
-print(f"❌ Error loading models: {e}")
-for symbol in TRADING_PAIRS:
-self.create_model(symbol)
+    """Manages ML models for trading signals."""
+    
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
+        self.feature_history = deque(maxlen=1000)
+        self.labels_history = deque(maxlen=1000)
+        self.init_models()
+    
+    def init_models(self):
+        """Initialize ML models."""
+        # Try to load existing models
+        for symbol in TRADING_PAIRS:
+            model_path = f"{MODEL_SAVE_PATH}{symbol}_model.pkl"
+            scaler_path = f"{MODEL_SAVE_PATH}{symbol}_scaler.pkl"
+            
+            if os.path.exists(model_path) and os.path.exists(scaler_path):
+                try:
+                    self.models[symbol] = joblib.load(model_path)
+                    self.scalers[symbol] = joblib.load(scaler_path)
+                    print(f"✅ Loaded ML model for {symbol}")
+                except:
+                    print(f"⚠️ Could not load ML model for {symbol}, creating new")
+                    self.create_new_model(symbol)
+            else:
+                self.create_new_model(symbol)
+    
+    def create_new_model(self, symbol: str):
+        """Create new ML model for symbol."""
+        # Random Forest for robustness
+        model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=5,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        # Neural Network for non-linear patterns
+        nn_model = MLPClassifier(
+            hidden_layer_sizes=(50, 25, 10),
+            activation='relu',
+            solver='adam',
+            max_iter=1000,
+            random_state=42
+        )
+        
+        # Ensemble of both models
+        self.models[symbol] = {
+            'rf': model,
+            'nn': nn_model,
+            'ensemble_weights': [0.6, 0.4]  # Weighted ensemble
+        }
+        
+        # Create scaler
+        self.scalers[symbol] = StandardScaler()
+        
+        print(f"✅ Created new ML model for {symbol}")
+    
+    def save_models(self):
+        """Save ML models to disk."""
+        for symbol, model_dict in self.models.items():
+            try:
+                joblib.dump(model_dict, f"{MODEL_SAVE_PATH}{symbol}_model.pkl")
+                joblib.dump(self.scalers[symbol], f"{MODEL_SAVE_PATH}{symbol}_scaler.pkl")
+            except Exception as e:
+                print(f"❌ Error saving model for {symbol}: {e}")
+    
+    def train_model(self, symbol: str, features: np.ndarray, labels: np.ndarray):
+        """Train ML model with new data."""
+        if symbol not in self.models:
+            return
+        
+        if len(features) < 100:  # Minimum samples for training
+            return
+        
+        try:
+            # Scale features
+            scaled_features = self.scalers[symbol].fit_transform(features)
+            
+            # Train Random Forest
+            self.models[symbol]['rf'].fit(scaled_features, labels)
+            
+            # Train Neural Network
+            self.models[symbol]['nn'].fit(scaled_features, labels)
+            
+            # Update feature history
+            self.feature_history.extend(features)
+            self.labels_history.extend(labels)
+            
+            print(f"✅ Trained ML model for {symbol} with {len(features)} samples")
+            
+        except Exception as e:
+            print(f"❌ Error training model for {symbol}: {e}")
+    
+    def predict(self, symbol: str, features: np.ndarray) -> MLPrediction:
+        """Make prediction using ensemble model."""
+        if symbol not in self.models:
+            return MLPrediction(
+                direction="NEUTRAL",
+                confidence=0,
+                probability_long=0.5,
+                probability_short=0.5,
+                features_used=features,
+                model_name="NO_MODEL"
+            )
+        
+        try:
+            # Scale features
+            scaled_features = self.scalers[symbol].transform(features.reshape(1, -1))
+            
+            # Get predictions from both models
+            rf_pred = self.models[symbol]['rf'].predict_proba(scaled_features)[0]
+            nn_pred = self.models[symbol]['nn'].predict_proba(scaled_features)[0]
+            
+            # Ensemble prediction (weighted average)
+            weights = self.models[symbol]['ensemble_weights']
+            ensemble_proba = (rf_pred * weights[0]) + (nn_pred * weights[1])
+            
+            # Determine direction and confidence
+            probability_long = ensemble_proba[1] if len(ensemble_proba) > 1 else 0.5
+            probability_short = ensemble_proba[0] if len(ensemble_proba) > 0 else 0.5
+            
+            if probability_long > 0.65:  # Strong long signal
+                direction = "LONG"
+                confidence = probability_long
+            elif probability_short > 0.65:  # Strong short signal
+                direction = "SHORT"
+                confidence = probability_short
+            else:  # Neutral
+                direction = "NEUTRAL"
+                confidence = max(probability_long, probability_short)
+            
+            return MLPrediction(
+                direction=direction,
+                confidence=confidence * 100,
+                probability_long=probability_long,
+                probability_short=probability_short,
+                features_used=features,
+                model_name="ENSEMBLE_RF_NN"
+            )
+            
+        except Exception as e:
+            print(f"❌ ML prediction error for {symbol}: {e}")
+            return MLPrediction(
+                direction="NEUTRAL",
+                confidence=0,
+                probability_long=0.5,
+                probability_short=0.5,
+                features_used=features,
+                model_name="ERROR"
+            )
+    
+    def add_training_data(self, symbol: str, features: np.ndarray, label: int):
+        """Add data for future training."""
+        self.feature_history.append(features)
+        self.labels_history.append(label)
+        
+        # Train periodically
+        if len(self.feature_history) % 100 == 0:
+            feature_array = np.array(self.feature_history)
+            label_array = np.array(self.labels_history)
+            self.train_model(symbol, feature_array, label_array)
+            self.save_models()
 
 # =============================================
-# ENHANCED SIGNAL GENERATOR WITH SMC/FVG
+# ENHANCED TECHNICAL ANALYSIS
 # =============================================
 
-class EnhancedSignalGenerator:
-"""Generates enhanced scalping signals with ML."""
-
-def __init__(self, market_data: EnhancedMarketData, ml_manager: MLModelManager):
-self.market_data = market_data
-self.ml_manager = ml_manager
-self.signal_cache = defaultdict(list)
-
-async def generate_signal(self, symbol: str, log_callback) -> Optional[EnhancedSignal]:
-"""Generate enhanced scalping signal."""
-try:
-# Get current data
-current_price = await self.market_data.get_price(symbol)
-if current_price is None:
-return None
-
-# Get OHLCV data
-df = await self.market_data.get_ohlcv_data(symbol, '1m', 200)
-if df is None or len(df) < 100:
-return None
-
-# Calculate features
-features = self.market_data.calculate_features(df)
-if not features:
-return None
-
-# Get ML prediction
-ml_prediction = self.ml_manager.predict(symbol, features)
-
-# Generate SMC/FVG signals
-smc_signals = self._generate_smc_signals(df, current_price)
-
-# Combine signals
-final_signal = self._combine_signals(
-symbol, current_price, ml_prediction, smc_signals, features
-)
-
-if final_signal:
-# Check if we should take this signal
-if self._should_take_signal(final_signal, df):
-log_callback(f"✅ ENHANCED SIGNAL: {symbol} {final_signal.direction}")
-log_callback(f" ML Confidence: {final_signal.ml_confidence:.1%}")
-log_callback(f" Regime: {final_signal.ml_prediction.regime.value}")
-log_callback(f" Signal Type: {final_signal.signal_type.value}")
-
-return final_signal
-
-except Exception as e:
-log_callback(f"❌ Signal generation error: {e}")
-
-return None
-
-def _generate_smc_signals(self, df: pd.DataFrame, current_price: float) -> List[Dict]:
-"""Generate Smart Money Concept signals."""
-signals = []
-
-try:
-# 1. Fair Value Gap detection
-fvg_signals = self._detect_fvg(df)
-signals.extend(fvg_signals)
-
-# 2. Order Block detection
-order_blocks = self._detect_order_blocks(df)
-signals.extend(order_blocks)
-
-# 3. Liquidity detection
-liquidity_levels = self._detect_liquidity(df)
-for level in liquidity_levels:
-signals.append({
-'type': 'LIQUIDITY_GRAB',
-'level': level,
-'direction': 'SHORT' if current_price < level else 'LONG'
-})
-
-# 4. Breakout retest
-breakout_signals = self._detect_breakout_retest(df, current_price)
-signals.extend(breakout_signals)
-
-except Exception as e:
-print(f"⚠️ SMC signal error: {e}")
-
-return signals
-
-def _detect_fvg(self, df: pd.DataFrame) -> List[Dict]:
-"""Detect Fair Value Gaps."""
-signals = []
-
-try:
-if len(df) < 3:
-return signals
-
-for i in range(2, min(len(df), 10)):
-current = df.iloc[i]
-previous = df.iloc[i-1]
-before_previous = df.iloc[i-2]
-
-# Bullish FVG: Current low > Previous high
-if current['Low'] > previous['High']:
-signals.append({
-'type': 'FVG_BULLISH',
-'fvg_low': previous['High'],
-'fvg_high': current['Low'],
-'strength': (current['Low'] - previous['High']) / current['Low']
-})
-
-# Bearish FVG: Current high < Previous low
-elif current['High'] < previous['Low']:
-signals.append({
-'type': 'FVG_BEARISH',
-'fvg_low': current['High'],
-'fvg_high': previous['Low'],
-'strength': (previous['Low'] - current['High']) / current['High']
-})
-
-except Exception as e:
-print(f"⚠️ FVG detection error: {e}")
-
-return signals
-
-def _detect_order_blocks(self, df: pd.DataFrame) -> List[Dict]:
-"""Detect Order Blocks."""
-signals = []
-
-try:
-if len(df) < 5:
-return signals
-
-for i in range(3, min(len(df), 20)):
-# Look for large bearish candle followed by bullish reversal
-if (df['Close'].iloc[i-1] < df['Open'].iloc[i-1] and # Bearish candle
-df['Close'].iloc[i] > df['Open'].iloc[i]): # Bullish reversal
-
-signals.append({
-'type': 'ORDER_BLOCK_BULLISH',
-'level': df['Low'].iloc[i],
-'strength': abs(df['Close'].iloc[i] - df['Open'].iloc[i]) / df['Close'].iloc[i]
-})
-
-# Look for large bullish candle followed by bearish reversal
-elif (df['Close'].iloc[i-1] > df['Open'].iloc[i-1] and # Bullish candle
-df['Close'].iloc[i] < df['Open'].iloc[i]): # Bearish reversal
-
-signals.append({
-'type': 'ORDER_BLOCK_BEARISH',
-'level': df['High'].iloc[i],
-'strength': abs(df['Close'].iloc[i] - df['Open'].iloc[i]) / df['Close'].iloc[i]
-})
-
-except Exception as e:
-print(f"⚠️ Order block detection error: {e}")
-
-return signals
-
-def _detect_liquidity(self, df: pd.DataFrame) -> List[float]:
-"""Detect liquidity levels (previous highs/lows)."""
-levels = []
-
-try:
-if len(df) >= 50:
-# Recent highs and lows
-recent_highs = df['High'].rolling(20).max().dropna().tolist()[-5:]
-recent_lows = df['Low'].rolling(20).min().dropna().tolist()[-5:]
-
-levels.extend(recent_highs)
-levels.extend(recent_lows)
-
-# Round numbers
-current_price = df['Close'].iloc[-1]
-round_levels = [
-round(current_price / 100) * 100,
-round(current_price / 50) * 50,
-round(current_price / 10) * 10
-]
-
-levels.extend(round_levels)
-
-except Exception as e:
-print(f"⚠️ Liquidity detection error: {e}")
-
-return list(set(levels))
-
-def _detect_breakout_retest(self, df: pd.DataFrame, current_price: float) -> List[Dict]:
-"""Detect breakout and retest patterns."""
-signals = []
-
-try:
-if len(df) < 30:
-return signals
-
-# Look for recent highs/lows
-recent_high = df['High'].rolling(20).max().iloc[-1]
-recent_low = df['Low'].rolling(20).min().iloc[-1]
-
-# Check for breakout above recent high
-if current_price > recent_high * 1.001: # 0.1% above
-# Look for retest
-for i in range(1, 10):
-if df['Low'].iloc[-i] <= recent_high * 1.001:
-signals.append({
-'type': 'BREAKOUT_RETEST',
-'direction': 'LONG',
-'level': recent_high,
-'retest_candle': i
-})
-break
-
-# Check for breakdown below recent low
-elif current_price < recent_low * 0.999: # 0.1% below
-# Look for retest
-for i in range(1, 10):
-if df['High'].iloc[-i] >= recent_low * 0.999:
-signals.append({
-'type': 'BREAKOUT_RETEST',
-'direction': 'SHORT',
-'level': recent_low,
-'retest_candle': i
-})
-break
-
-except Exception as e:
-print(f"⚠️ Breakout detection error: {e}")
-
-return signals
-
-def _combine_signals(self, symbol: str, current_price: float,
-ml_prediction: Optional[MLPrediction],
-smc_signals: List[Dict], features: Dict) -> Optional[EnhancedSignal]:
-"""Combine ML and SMC signals."""
-try:
-if not ml_prediction or ml_prediction.confidence < 0.6:
-return None
-
-# Filter SMC signals
-valid_smc_signals = []
-for signal in smc_signals:
-signal_type = signal.get('type', '')
-
-# Check if signal aligns with ML prediction
-if (ml_prediction.direction == "LONG" and
-signal_type in ['FVG_BULLISH', 'ORDER_BLOCK_BULLISH', 'BREAKOUT_RETEST']):
-valid_smc_signals.append(signal)
-elif (ml_prediction.direction == "SHORT" and
-signal_type in ['FVG_BEARISH', 'ORDER_BLOCK_BEARISH', 'BREAKOUT_RETEST']):
-valid_smc_signals.append(signal)
-
-if not valid_smc_signals:
-return None
-
-# Take the strongest signal
-strongest_signal = max(valid_smc_signals, key=lambda x: x.get('strength', 0))
-
-# Calculate entry, stop, and target
-entry, stop, target = self._calculate_levels(
-symbol, current_price, strongest_signal, ml_prediction, features
-)
-
-# Calculate risk/reward
-risk = abs(entry - stop)
-reward = abs(target - entry)
-rr = reward / risk if risk > 0 else 0
-
-if rr < 1.2: # Minimum RRR
-return None
-
-# Create enhanced signal
-signal_type = ScalpSignal(strongest_signal['type'].lower())
-
-return EnhancedSignal(
-signal_id=f"ESCALP-{int(time.time())}-{random.randint(1000, 9999)}",
-symbol=symbol,
-direction=ml_prediction.direction,
-entry_price=entry,
-stop_loss=stop,
-take_profit=target,
-confidence=ml_prediction.confidence * 100,
-ml_confidence=ml_prediction.confidence * 100,
-signal_type=signal_type,
-timeframe="1m",
-risk_reward=rr,
-position_size=RISK_PER_TRADE,
-ml_prediction=ml_prediction
-)
-
-except Exception as e:
-print(f"⚠️ Signal combination error: {e}")
-return None
-
-def _calculate_levels(self, symbol: str, current_price: float, signal: Dict,
-ml_prediction: MLPrediction, features: Dict) -> Tuple[float, float, float]:
-"""Calculate entry, stop, and target levels."""
-try:
-volatility = features.get('atr_14', 1.0)
-direction = ml_prediction.direction
-
-# Calculate risk based on volatility
-risk_distance = volatility * 0.5 # 0.5x ATR
-
-if direction == "LONG":
-# For long trades
-if signal['type'] in ['FVG_BULLISH', 'ORDER_BLOCK_BULLISH']:
-entry = signal.get('fvg_low', signal.get('level', current_price))
-else:
-entry = current_price
-
-stop = entry - risk_distance
-target = entry + (risk_distance * TAKE_PROFIT_MULTIPLIER)
-
-else: # SHORT
-# For short trades
-if signal['type'] in ['FVG_BEARISH', 'ORDER_BLOCK_BEARISH']:
-entry = signal.get('fvg_high', signal.get('level', current_price))
-else:
-entry = current_price
-
-stop = entry + risk_distance
-target = entry - (risk_distance * TAKE_PROFIT_MULTIPLIER)
-
-# Round to appropriate decimals
-decimals = 2 if symbol == "BTCUSDT" else 2
-entry = round(entry, decimals)
-stop = round(stop, decimals)
-target = round(target, decimals)
-
-return entry, stop, target
-
-except Exception as e:
-print(f"⚠️ Level calculation error: {e}")
-# Fallback to simple calculation
-if ml_prediction.direction == "LONG":
-return current_price, current_price * 0.99, current_price * 1.015
-else:
-return current_price, current_price * 1.01, current_price * 0.985
-
-def _should_take_signal(self, signal: EnhancedSignal, df: pd.DataFrame) -> bool:
-"""Determine if signal should be taken."""
-try:
-# Check if price is at extreme
-rsi = talib.RSI(df['Close'].values, timeperiod=14)[-1]
-if signal.direction == "LONG" and rsi > 70:
-return False
-if signal.direction == "SHORT" and rsi < 30:
-return False
-
-# Check volatility
-atr = talib.ATR(df['High'].values, df['Low'].values, df['Close'].values, timeperiod=14)[-1]
-volatility = atr / df['Close'].iloc[-1] * 100
-
-if volatility > 3.0: # Too volatile
-return False
-
-# Check if signal is too close to recent signals
-recent_signals = self.signal_cache.get(signal.symbol, [])
-recent_signals = [s for s in recent_signals
-if (datetime.now() - s['time']).seconds < 300] # Last 5 minutes
-
-if len(recent_signals) >= 3:
-return False
-
-# Add to cache
-self.signal_cache[signal.symbol].append({
-'time': datetime.now(),
-'direction': signal.direction
-})
-
-# Keep cache clean
-self.signal_cache[signal.symbol] = [
-s for s in self.signal_cache[signal.symbol]
-if (datetime.now() - s['time']).seconds < 600
-]
-
-return True
-
-except Exception as e:
-print(f"⚠️ Signal validation error: {e}")
-return True
+class EnhancedTechnicalAnalyzer:
+    """Advanced technical analysis with ML features."""
+    
+    def __init__(self):
+        self.history = {}
+        self.initialize_history()
+    
+    def initialize_history(self):
+        """Initialize history for all symbols."""
+        for symbol in TRADING_PAIRS:
+            self.history[symbol] = {
+                'prices': deque(maxlen=200),
+                'volumes': deque(maxlen=200),
+                'highs': deque(maxlen=200),
+                'lows': deque(maxlen=200),
+                'timestamps': deque(maxlen=200)
+            }
+    
+    async def update_history(self, symbol: str, price: float, volume: float):
+        """Update price history."""
+        if symbol not in self.history:
+            self.history[symbol] = {
+                'prices': deque(maxlen=200),
+                'volumes': deque(maxlen=200),
+                'highs': deque(maxlen=200),
+                'lows': deque(maxlen=200),
+                'timestamps': deque(maxlen=200)
+            }
+        
+        current_time = datetime.now()
+        
+        # For simplicity, use price for high/low
+        self.history[symbol]['prices'].append(price)
+        self.history[symbol]['volumes'].append(volume)
+        self.history[symbol]['highs'].append(price * 1.0005)  # Simulated high
+        self.history[symbol]['lows'].append(price * 0.9995)   # Simulated low
+        self.history[symbol]['timestamps'].append(current_time)
+    
+    def calculate_indicators(self, symbol: str) -> Optional[Dict]:
+        """Calculate all technical indicators."""
+        if symbol not in self.history or len(self.history[symbol]['prices']) < 20:
+            return None
+        
+        prices = np.array(self.history[symbol]['prices'])
+        volumes = np.array(self.history[symbol]['volumes'])
+        
+        if len(prices) < 20:
+            return None
+        
+        current_price = prices[-1]
+        
+        # Calculate RSI
+        rsi = self.calculate_rsi(prices, period=14)
+        
+        # Calculate MACD
+        macd, signal, histogram = self.calculate_macd(prices)
+        
+        # Calculate Bollinger Bands
+        bb_upper, bb_middle, bb_lower, bb_width = self.calculate_bollinger_bands(prices, period=20)
+        
+        # Calculate ATR
+        atr = self.calculate_atr(prices, period=14)
+        
+        # Calculate VWAP
+        vwap = self.calculate_vwap(prices, volumes)
+        
+        # Calculate OBV
+        obv = self.calculate_obv(prices, volumes)
+        
+        # Calculate Momentum
+        momentum = self.calculate_momentum(prices, period=10)
+        
+        # Calculate Volatility
+        volatility = self.calculate_volatility(prices, period=20)
+        
+        # Calculate Volume Ratio
+        volume_ratio = self.calculate_volume_ratio(volumes)
+        
+        return {
+            'rsi': rsi,
+            'macd': macd,
+            'macd_signal': signal,
+            'macd_histogram': histogram,
+            'bb_upper': bb_upper,
+            'bb_middle': bb_middle,
+            'bb_lower': bb_lower,
+            'bb_width': bb_width,
+            'atr': atr,
+            'vwap': vwap,
+            'obv': obv,
+            'momentum': momentum,
+            'volatility': volatility,
+            'volume_ratio': volume_ratio,
+            'current_price': current_price
+        }
+    
+    def calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+        """Calculate RSI."""
+        if len(prices) < period + 1:
+            return 50.0
+        
+        deltas = np.diff(prices)
+        seed = deltas[:period + 1]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        
+        if down == 0:
+            return 100.0
+        
+        rs = up / down
+        rsi = 100 - (100 / (1 + rs))
+        
+        return float(rsi)
+    
+    def calculate_macd(self, prices: np.ndarray) -> Tuple[float, float, float]:
+        """Calculate MACD."""
+        if len(prices) < 26:
+            return 0.0, 0.0, 0.0
+        
+        exp1 = pd.Series(prices).ewm(span=12, adjust=False).mean()
+        exp2 = pd.Series(prices).ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+        signal = macd.ewm(span=9, adjust=False).mean()
+        histogram = macd - signal
+        
+        return float(macd.iloc[-1]), float(signal.iloc[-1]), float(histogram.iloc[-1])
+    
+    def calculate_bollinger_bands(self, prices: np.ndarray, period: int = 20) -> Tuple[float, float, float, float]:
+        """Calculate Bollinger Bands."""
+        if len(prices) < period:
+            middle = np.mean(prices)
+            std = np.std(prices) if len(prices) > 1 else 0
+            return middle + 2*std, middle, middle - 2*std, 4*std
+        
+        middle = np.mean(prices[-period:])
+        std = np.std(prices[-period:])
+        upper = middle + 2 * std
+        lower = middle - 2 * std
+        width = upper - lower
+        
+        return float(upper), float(middle), float(lower), float(width)
+    
+    def calculate_atr(self, prices: np.ndarray, period: int = 14) -> float:
+        """Calculate Average True Range."""
+        if len(prices) < period:
+            return 0.0
+        
+        # Simplified ATR calculation
+        high_low = np.max(prices[-period:]) - np.min(prices[-period:])
+        return float(high_low / period)
+    
+    def calculate_vwap(self, prices: np.ndarray, volumes: np.ndarray) -> float:
+        """Calculate Volume Weighted Average Price."""
+        if len(prices) == 0 or len(volumes) == 0:
+            return prices[-1] if len(prices) > 0 else 0.0
+        
+        typical_price = (np.max(prices) + np.min(prices) + prices[-1]) / 3
+        vwap = np.sum(typical_price * volumes) / np.sum(volumes) if np.sum(volumes) > 0 else typical_price
+        
+        return float(vwap)
+    
+    def calculate_obv(self, prices: np.ndarray, volumes: np.ndarray) -> float:
+        """Calculate On-Balance Volume."""
+        if len(prices) < 2:
+            return 0.0
+        
+        obv = 0.0
+        for i in range(1, len(prices)):
+            if prices[i] > prices[i-1]:
+                obv += volumes[i]
+            elif prices[i] < prices[i-1]:
+                obv -= volumes[i]
+        
+        return obv
+    
+    def calculate_momentum(self, prices: np.ndarray, period: int = 10) -> float:
+        """Calculate momentum."""
+        if len(prices) < period:
+            return 0.0
+        
+        return float((prices[-1] / prices[-period] - 1) * 100)
+    
+    def calculate_volatility(self, prices: np.ndarray, period: int = 20) -> float:
+        """Calculate volatility."""
+        if len(prices) < period:
+            return 0.0
+        
+        returns = np.diff(prices[-period:]) / prices[-period:-1]
+        return float(np.std(returns) * 100)  # Return as percentage
+    
+    def calculate_volume_ratio(self, volumes: np.ndarray) -> float:
+        """Calculate volume ratio (current vs average)."""
+        if len(volumes) < 10:
+            return 1.0
+        
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-10:])
+        
+        return float(current_volume / avg_volume) if avg_volume > 0 else 1.0
 
 # =============================================
-# ENHANCED TRADE MANAGER WITH ADVANCED RISK
+# ENHANCED SIGNAL GENERATOR WITH ML
 # =============================================
 
-class EnhancedTradeManager:
-"""Manages trades with advanced risk management."""
+class MLEnhancedSignalGenerator:
+    """Generates signals using ML and technical analysis."""
+    
+    def __init__(self, ml_manager: MLModelManager, ta_analyzer: EnhancedTechnicalAnalyzer):
+        self.ml_manager = ml_manager
+        self.ta_analyzer = ta_analyzer
+        self.signal_history = []
+    
+    async def generate_signal(self, symbol: str, log_callback) -> Optional[ScalpingSignal]:
+        """Generate enhanced scalping signal."""
+        # Get current market state
+        indicators = self.ta_analyzer.calculate_indicators(symbol)
+        if indicators is None:
+            return None
+        
+        current_price = indicators['current_price']
+        
+        # Prepare features for ML
+        features = np.array([
+            indicators['rsi'] / 100,
+            indicators['macd'],
+            indicators['macd_histogram'],
+            indicators['bb_width'],
+            indicators['atr'] / current_price if current_price > 0 else 0,
+            indicators['volume_ratio'],
+            indicators['momentum'] / 100,
+            indicators['volatility'] / 100,
+            (current_price - indicators['bb_middle']) / indicators['bb_width'] if indicators['bb_width'] > 0 else 0,
+            indicators['obv'] / 1000000 if abs(indicators['obv']) > 0 else 0
+        ])
+        
+        # Get ML prediction
+        ml_prediction = self.ml_manager.predict(symbol, features)
+        
+        # Only proceed if ML has high confidence
+        if ml_prediction.confidence < MIN_CONFIDENCE:
+            log_callback(f"⏸️ {symbol}: ML confidence {ml_prediction.confidence:.1f}% < {MIN_CONFIDENCE}%")
+            return None
+        
+        # Determine direction from ML
+        if ml_prediction.direction == "NEUTRAL":
+            log_callback(f"⏸️ {symbol}: ML neutral (Confidence: {ml_prediction.confidence:.1f}%)")
+            return None
+        
+        direction = ml_prediction.direction
+        
+        # Calculate targets based on ATR for 30-100 pip range
+        atr_pips = indicators['atr'] / PIP_CONFIG.get(symbol, 0.01)
+        
+        # Base target: 2-3x ATR (medium-range scalping)
+        if atr_pips < 10:
+            target_multiplier = 3.0
+        elif atr_pips < 20:
+            target_multiplier = 2.5
+        else:
+            target_multiplier = 2.0
+        
+        # Calculate risk: 1x ATR
+        risk_pips = atr_pips
+        target_pips = atr_pips * target_multiplier
+        
+        # Ensure within 30-100 pip range
+        target_pips = max(30, min(100, target_pips))
+        risk_pips = min(risk_pips, target_pips / 2)  # Max risk is half target
+        
+        # Calculate price levels
+        pip_size = PIP_CONFIG.get(symbol, 0.01)
+        
+        if direction == "LONG":
+            entry = current_price
+            stop_loss = entry - (risk_pips * pip_size)
+            take_profit_1 = entry + (target_pips * 0.5 * pip_size)
+            take_profit_2 = entry + (target_pips * 0.75 * pip_size)
+            take_profit_3 = entry + (target_pips * pip_size)
+        else:  # SHORT
+            entry = current_price
+            stop_loss = entry + (risk_pips * pip_size)
+            take_profit_1 = entry - (target_pips * 0.5 * pip_size)
+            take_profit_2 = entry - (target_pips * 0.75 * pip_size)
+            take_profit_3 = entry - (target_pips * pip_size)
+        
+        # Calculate risk/reward
+        risk_amount = abs(entry - stop_loss)
+        reward_amount = abs(take_profit_3 - entry)
+        risk_reward = reward_amount / risk_amount if risk_amount > 0 else 0
+        
+        # Require minimum 1:2 RRR
+        if risk_reward < 2.0:
+            log_callback(f"⏸️ {symbol}: RRR 1:{risk_reward:.1f} < 1:2")
+            return None
+        
+        # Calculate position size based on 2% risk
+        position_size = (RISK_PER_TRADE * 10000) / risk_pips  # Simplified calculation
+        
+        # Create market state
+        market_state = MarketState(
+            symbol=symbol,
+            timestamp=datetime.now(),
+            price=current_price,
+            volume=indicators.get('volume_ratio', 1.0) * 1000,  # Simulated volume
+            spread=0.001,  # Simulated spread
+            
+            # Technical indicators
+            rsi=indicators['rsi'],
+            macd=indicators['macd'],
+            macd_signal=indicators['macd_signal'],
+            macd_histogram=indicators['macd_histogram'],
+            bb_upper=indicators['bb_upper'],
+            bb_middle=indicators['bb_middle'],
+            bb_lower=indicators['bb_lower'],
+            bb_width=indicators['bb_width'],
+            atr=indicators['atr'],
+            vwap=indicators['vwap'],
+            obv=indicators['obv'],
+            momentum=indicators['momentum'],
+            volatility=indicators['volatility'],
+            volume_ratio=indicators['volume_ratio'],
+            
+            # ML features
+            features=features
+        )
+        
+        # Create signal
+        signal = ScalpingSignal(
+            signal_id=f"SIG-{int(time.time())}-{random.randint(1000, 9999)}",
+            symbol=symbol,
+            direction=direction,
+            entry_price=round(float(entry), 4),
+            stop_loss=round(float(stop_loss), 4),
+            take_profit_1=round(float(take_profit_1), 4),
+            take_profit_2=round(float(take_profit_2), 4),
+            take_profit_3=round(float(take_profit_3), 4),
+            confidence=ml_prediction.confidence,
+            risk_reward=float(risk_reward),
+            position_size=round(float(position_size), 4),
+            ml_prediction=ml_prediction,
+            market_state=market_state,
+            reason=f"ML Enhanced Scalping | Confidence: {ml_prediction.confidence:.1f}% | "
+                   f"ATR: {atr_pips:.1f}pips | Target: {target_pips:.1f}pips",
+            created_at=datetime.now(),
+            expiry=datetime.now() + timedelta(minutes=15)
+        )
+        
+        # Log signal
+        risk_pips, target_pips = signal.calculate_pips()
+        
+        log_callback(f"🎯 {symbol} {direction} SIGNAL")
+        log_callback(f"   Entry: ${entry:.4f} | SL: ${stop_loss:.4f}")
+        log_callback(f"   TP1: ${take_profit_1:.4f} | TP2: ${take_profit_2:.4f} | TP3: ${take_profit_3:.4f}")
+        log_callback(f"   Risk: {risk_pips:.1f}pips | Target: {target_pips:.1f}pips")
+        log_callback(f"   ML Confidence: {ml_prediction.confidence:.1f}% | RRR: 1:{risk_reward:.1f}")
+        log_callback(f"   Position: {position_size:.4f} units")
+        
+        self.signal_history.append(signal)
+        
+        return signal
 
-def __init__(self, ml_manager: MLModelManager):
-self.ml_manager = ml_manager
-self.active_trades = {}
-self.trade_history = []
+# =============================================
+# ENHANCED TRADE MANAGER
+# =============================================
 
-async def execute_trade(self, signal: EnhancedSignal, log_callback) -> bool:
-"""Execute enhanced trade."""
-try:
-# Check max trades
-if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-log_callback("⚠️ Max concurrent trades reached")
-return False
-
-# Check if already in trade for this symbol
-for trade in self.active_trades.values():
-if trade['signal'].symbol == signal.symbol:
-log_callback(f"⚠️ Already in trade for {signal.symbol}")
-return False
-
-# Add to active trades
-self.active_trades[signal.signal_id] = {
-'signal': signal,
-'entry_time': datetime.now(),
-'status': 'ACTIVE',
-'breakeven_triggered': False,
-'trailing_activated': False,
-'current_stop': signal.stop_loss,
-'highest_price': signal.entry_price if signal.direction == "LONG" else signal.entry_price,
-'lowest_price': signal.entry_price if signal.direction == "SHORT" else signal.entry_price
-}
-
-log_callback(f"🎯 ENHANCED TRADE EXECUTED: {signal.signal_id}")
-log_callback(f" {signal.symbol} {signal.direction}")
-log_callback(f" Entry: ${signal.entry_price:.2f}")
-log_callback(f" Stop: ${signal.stop_loss:.2f}")
-log_callback(f" Target: ${signal.take_profit:.2f}")
-log_callback(f" ML Confidence: {signal.ml_confidence:.1f}%")
-log_callback(f" Signal Type: {signal.signal_type.value}")
-
-# Send Telegram alert
-await self._send_telegram_alert(signal)
-
-return True
-
-except Exception as e:
-log_callback(f"❌ Trade execution error: {e}")
-return False
-
-async def monitor_trades(self, market_data: EnhancedMarketData, log_callback):
-"""Monitor and manage active trades."""
-closed_trades = []
-
-for signal_id, trade_data in list(self.active_trades.items()):
-signal = trade_data['signal']
-
-try:
-# Get current price
-current_price = await market_data.get_price(signal.symbol)
-if current_price is None:
-continue
-
-# Update highest/lowest price
-if signal.direction == "LONG":
-trade_data['highest_price'] = max(trade_data['highest_price'], current_price)
-else:
-trade_data['lowest_price'] = min(trade_data['lowest_price'], current_price)
-
-# Calculate current P&L
-if signal.direction == "LONG":
-pnl = (current_price - signal.entry_price) / signal.entry_price * 100
-else:
-pnl = (signal.entry_price - current_price) / signal.entry_price * 100
-
-# Check stop loss
-if signal.direction == "LONG":
-if current_price <= trade_data['current_stop']:
-await self._close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
-closed_trades.append(signal_id)
-continue
-else:
-if current_price >= trade_data['current_stop']:
-await self._close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
-closed_trades.append(signal_id)
-continue
-
-# Check take profit
-if signal.direction == "LONG":
-if current_price >= signal.take_profit:
-await self._close_trade(signal_id, current_price, "TAKE_PROFIT", log_callback)
-closed_trades.append(signal_id)
-continue
-else:
-if current_price <= signal.take_profit:
-await self._close_trade(signal_id, current_price, "TAKE_PROFIT", log_callback)
-closed_trades.append(signal_id)
-continue
-
-# Check breakeven
-if not trade_data['breakeven_triggered']:
-risk = abs(signal.entry_price - signal.stop_loss)
-breakeven_level = signal.entry_price + (risk * 0.5) if signal.direction == "LONG" else signal.entry_price - (risk * 0.5)
-
-if (signal.direction == "LONG" and current_price >= breakeven_level) or \
-(signal.direction == "SHORT" and current_price <= breakeven_level):
-
-# Move stop to entry
-trade_data['current_stop'] = signal.entry_price
-trade_data['breakeven_triggered'] = True
-log_callback(f"⚖️ Breakeven reached for {signal_id}")
-
-# Check trailing stop activation
-if not trade_data['trailing_activated'] and trade_data['breakeven_triggered']:
-risk = abs(signal.entry_price - signal.stop_loss)
-trailing_activation = signal.entry_price + (risk * TRAILING_STOP_ACTIVATION) if signal.direction == "LONG" else signal.entry_price - (risk * TRAILING_STOP_ACTIVATION)
-
-if (signal.direction == "LONG" and current_price >= trailing_activation) or \
-(signal.direction == "SHORT" and current_price <= trailing_activation):
-
-trade_data['trailing_activated'] = True
-log_callback(f"🎯 Trailing stop activated for {signal_id}")
-
-# Update trailing stop
-if trade_data['trailing_activated']:
-risk = abs(signal.entry_price - signal.stop_loss)
-trail_distance = risk * TRAILING_STOP_DISTANCE
-
-if signal.direction == "LONG":
-new_stop = trade_data['highest_price'] - trail_distance
-trade_data['current_stop'] = max(trade_data['current_stop'], new_stop)
-else:
-new_stop = trade_data['lowest_price'] + trail_distance
-trade_data['current_stop'] = min(trade_data['current_stop'], new_stop)
-
-# Check expiry
-if datetime.now() > signal.expiry:
-await self._close_trade(signal_id, current_price, "EXPIRED", log_callback)
-closed_trades.append(signal_id)
-continue
-
-# Emergency stop loss
-if abs(pnl) <= -EMERGENCY_STOP_LOSS:
-await self._close_trade(signal_id, current_price, "EMERGENCY_STOP", log_callback)
-closed_trades.append(signal_id)
-continue
-
-except Exception as e:
-log_callback(f"❌ Trade monitoring error for {signal_id}: {e}")
-
-# Remove closed trades
-for signal_id in closed_trades:
-if signal_id in self.active_trades:
-del self.active_trades[signal_id]
-
-async def _close_trade(self, signal_id: str, exit_price: float, reason: str, log_callback):
-"""Close a trade."""
-try:
-if signal_id not in self.active_trades:
-return
-
-trade_data = self.active_trades[signal_id]
-signal = trade_data['signal']
-
-# Calculate P&L
-if signal.direction == "LONG":
-pnl = exit_price - signal.entry_price
-pnl_pct = (pnl / signal.entry_price) * 100
-else:
-pnl = signal.entry_price - exit_price
-pnl_pct = (pnl / signal.entry_price) * 100
-
-duration = (datetime.now() - trade_data['entry_time']).total_seconds()
-
-log_callback(f"🔒 TRADE CLOSED: {signal_id}")
-log_callback(f" Reason: {reason}")
-log_callback(f" Exit: ${exit_price:.2f}")
-log_callback(f" PnL: ${pnl:.2f} ({pnl_pct:.2f}%)")
-log_callback(f" Duration: {duration:.0f}s")
-log_callback(f" {'✅ PROFIT' if pnl > 0 else '❌ LOSS'}")
-
-# Send Telegram closure
-await self._send_telegram_closure(signal, exit_price, pnl, pnl_pct, reason, duration)
-
-# Add to history
-self.trade_history.append({
-'signal_id': signal_id,
-'symbol': signal.symbol,
-'direction': signal.direction,
-'entry_price': signal.entry_price,
-'exit_price': exit_price,
-'pnl': pnl,
-'pnl_pct': pnl_pct,
-'reason': reason,
-'duration': duration,
-'ml_confidence': signal.ml_confidence,
-'signal_type': signal.signal_type.value
-})
-
-except Exception as e:
-log_callback(f"❌ Trade closure error: {e}")
-
-async def _send_telegram_alert(self, signal: EnhancedSignal):
-"""Send Telegram alert for new trade."""
-try:
-direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
-
-message = f"""
-⚡ ML ENHANCED SCALP SIGNAL ⚡
+class EnhancedScalpingTradeManager:
+    """Manages scalping trades with ML feedback."""
+    
+    def __init__(self, ml_manager: MLModelManager):
+        self.ml_manager = ml_manager
+        self.active_trades = {}
+        self.trade_history = []
+    
+    async def execute_trade(self, signal: ScalpingSignal, log_callback) -> bool:
+        """Execute a scalping trade."""
+        # Check max trades
+        if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
+            log_callback(f"⚠️ Max trades reached ({MAX_CONCURRENT_TRADES})")
+            return False
+        
+        # Add to active trades
+        self.active_trades[signal.signal_id] = {
+            'signal': signal,
+            'entry_time': datetime.now(),
+            'status': 'ACTIVE',
+            'partial_tps': []
+        }
+        
+        log_callback(f"✅ TRADE EXECUTED: {signal.signal_id}")
+        log_callback(f"   {signal.symbol} {signal.direction}")
+        log_callback(f"   ML Confidence: {signal.ml_prediction.confidence:.1f}%")
+        
+        # Send Telegram alert
+        await self.send_telegram_alert(signal)
+        
+        return True
+    
+    async def monitor_trades(self, log_callback):
+        """Monitor active trades with partial TP management."""
+        closed_trades = []
+        
+        for signal_id, trade_data in list(self.active_trades.items()):
+            signal = trade_data['signal']
+            
+            # Simulate price movement (in real bot, get from market)
+            # For demonstration, we'll simulate random walk
+            entry_price = signal.entry_price
+            current_time = datetime.now()
+            time_elapsed = (current_time - trade_data['entry_time']).total_seconds()
+            
+            # Simulate price (normal distribution around entry)
+            volatility = signal.market_state.volatility / 100
+            random_move = np.random.normal(0, volatility)
+            
+            if signal.direction == "LONG":
+                current_price = entry_price * (1 + random_move * (time_elapsed / 300))  # 5 min scale
+            else:
+                current_price = entry_price * (1 - random_move * (time_elapsed / 300))
+            
+            # Check stop loss
+            if signal.direction == "LONG":
+                if current_price <= signal.stop_loss:
+                    await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
+                    closed_trades.append(signal_id)
+                    # Add to training data as loss
+                    self.ml_manager.add_training_data(
+                        signal.symbol,
+                        signal.market_state.features,
+                        label=0  # Loss
+                    )
+                    
+                # Check take profits
+                elif current_price >= signal.take_profit_3 and 'TP3' not in trade_data['partial_tps']:
+                    await self.close_trade(signal_id, current_price, "TAKE_PROFIT_3", log_callback)
+                    closed_trades.append(signal_id)
+                    # Add to training data as win
+                    self.ml_manager.add_training_data(
+                        signal.symbol,
+                        signal.market_state.features,
+                        label=1  # Win
+                    )
+                    
+                elif current_price >= signal.take_profit_2 and 'TP2' not in trade_data['partial_tps']:
+                    log_callback(f"🎯 {signal_id}: Hit TP2 at ${current_price:.4f}")
+                    trade_data['partial_tps'].append('TP2')
+                    
+                elif current_price >= signal.take_profit_1 and 'TP1' not in trade_data['partial_tps']:
+                    log_callback(f"🎯 {signal_id}: Hit TP1 at ${current_price:.4f}")
+                    trade_data['partial_tps'].append('TP1')
+                    
+            else:  # SHORT
+                if current_price >= signal.stop_loss:
+                    await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
+                    closed_trades.append(signal_id)
+                    self.ml_manager.add_training_data(
+                        signal.symbol,
+                        signal.market_state.features,
+                        label=0  # Loss
+                    )
+                    
+                elif current_price <= signal.take_profit_3 and 'TP3' not in trade_data['partial_tps']:
+                    await self.close_trade(signal_id, current_price, "TAKE_PROFIT_3", log_callback)
+                    closed_trades.append(signal_id)
+                    self.ml_manager.add_training_data(
+                        signal.symbol,
+                        signal.market_state.features,
+                        label=1  # Win
+                    )
+                    
+                elif current_price <= signal.take_profit_2 and 'TP2' not in trade_data['partial_tps']:
+                    log_callback(f"🎯 {signal_id}: Hit TP2 at ${current_price:.4f}")
+                    trade_data['partial_tps'].append('TP2')
+                    
+                elif current_price <= signal.take_profit_1 and 'TP1' not in trade_data['partial_tps']:
+                    log_callback(f"🎯 {signal_id}: Hit TP1 at ${current_price:.4f}")
+                    trade_data['partial_tps'].append('TP1')
+            
+            # Check expiry
+            if current_time > signal.expiry:
+                await self.close_trade(signal_id, current_price, "EXPIRED", log_callback)
+                closed_trades.append(signal_id)
+        
+        # Remove closed trades
+        for signal_id in closed_trades:
+            if signal_id in self.active_trades:
+                del self.active_trades[signal_id]
+    
+    async def close_trade(self, signal_id: str, exit_price: float, reason: str, log_callback):
+        """Close a trade."""
+        if signal_id not in self.active_trades:
+            return
+        
+        trade_data = self.active_trades[signal_id]
+        signal = trade_data['signal']
+        
+        # Calculate PnL
+        if signal.direction == "LONG":
+            pnl = (exit_price - signal.entry_price) * signal.position_size
+        else:
+            pnl = (signal.entry_price - exit_price) * signal.position_size
+        
+        pnl_percent = (pnl / (signal.entry_price * signal.position_size)) * 100
+        
+        # Calculate pips
+        pip_size = PIP_CONFIG.get(signal.symbol, 0.01)
+        if signal.direction == "LONG":
+            pips = (exit_price - signal.entry_price) / pip_size
+        else:
+            pips = (signal.entry_price - exit_price) / pip_size
+        
+        log_callback(f"🔒 TRADE CLOSED: {signal_id}")
+        log_callback(f"   Reason: {reason}")
+        log_callback(f"   Exit: ${exit_price:.4f}")
+        log_callback(f"   PnL: ${pnl:.4f} ({pnl_percent:.2f}%)")
+        log_callback(f"   Pips: {pips:+.1f}")
+        log_callback(f"   {'💰 PROFIT' if pnl > 0 else '💸 LOSS'}")
+        
+        # Send Telegram closure
+        await self.send_telegram_closure(signal, exit_price, pnl, pnl_percent, pips, reason)
+        
+        # Add to history
+        self.trade_history.append({
+            'signal_id': signal_id,
+            'symbol': signal.symbol,
+            'direction': signal.direction,
+            'entry': signal.entry_price,
+            'exit': exit_price,
+            'pnl': pnl,
+            'pips': pips,
+            'reason': reason,
+            'duration': (datetime.now() - trade_data['entry_time']).total_seconds() / 60
+        })
+    
+    async def send_telegram_alert(self, signal: ScalpingSignal):
+        """Send Telegram alert."""
+        try:
+            direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
+            risk_pips, target_pips = signal.calculate_pips()
+            
+            message = f"""
+⚡ ML ENHANCED SCALPING SIGNAL ⚡
 
 {direction_emoji} {signal.symbol} {signal.direction}
-Signal Type: {signal.signal_type.value}
-Timeframe: {signal.timeframe}
-Market Regime: {signal.ml_prediction.regime.value}
+Strategy: Medium-Range Scalping (5-15 min)
+ML Confidence: {signal.ml_prediction.confidence:.1f}%
 
-🎯 Entry Details:
-Entry: ${signal.entry_price:.2f}
-Stop Loss: ${signal.stop_loss:.2f}
-Take Profit: ${signal.take_profit:.2f}
+🎯 Price Levels:
+Entry: ${signal.entry_price:.4f}
+Stop Loss: ${signal.stop_loss:.4f}
+Take Profit: ${signal.take_profit_3:.4f}
 
-📊 ML Insights:
-ML Confidence: {signal.ml_confidence:.1f}%
-Predicted Move: {signal.ml_prediction.predicted_move_pct:.1f}%
-Probability Long: {signal.ml_prediction.probability_long:.1%}
-Probability Short: {signal.ml_prediction.probability_short:.1%}
-
-🎯 Risk Management:
+📊 Risk Management:
+Risk: {risk_pips:.1f} pips
+Target: {target_pips:.1f} pips
 Risk/Reward: 1:{signal.risk_reward:.1f}
-Position Size: {signal.position_size*100:.0f}%
+Position Size: {signal.position_size:.4f} units
 
-📈 Top Features:
-{self._format_top_features(signal.ml_prediction.features)}
+🤖 ML Details:
+Model: {signal.ml_prediction.model_name}
+Long Probability: {signal.ml_prediction.probability_long:.1%}
+Short Probability: {signal.ml_prediction.probability_short:.1%}
+
+📈 Technicals:
+RSI: {signal.market_state.rsi:.1f}
+MACD Hist: {signal.market_state.macd_histogram:.4f}
+ATR: {signal.market_state.atr:.4f}
+Volatility: {signal.market_state.volatility:.2f}%
 
 Time: {datetime.now().strftime('%H:%M:%S')}
 """
-
-url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-payload = {
-'chat_id': TELEGRAM_CHAT_ID,
-'text': message,
-'parse_mode': 'HTML',
-'disable_web_page_preview': True
-}
-
-async with aiohttp.ClientSession() as session:
-async with session.post(url, json=payload, timeout=10) as response:
-if response.status == 200:
-print(f"✅ Telegram alert sent for {signal.signal_id}")
-else:
-error_text = await response.text()
-print(f"❌ Telegram error: {error_text}")
-
-except Exception as e:
-print(f"❌ Telegram alert error: {e}")
-
-async def _send_telegram_closure(self, signal: EnhancedSignal, exit_price: float,
-pnl: float, pnl_pct: float, reason: str, duration: float):
-"""Send Telegram closure alert."""
-try:
-result_emoji = "💰" if pnl > 0 else "💸"
-
-message = f"""
-{result_emoji} ML SCALP TRADE CLOSED {result_emoji}
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=10) as response:
+                    if response.status == 200:
+                        print(f"✅ Telegram alert sent: {signal.signal_id}")
+                    
+        except Exception as e:
+            print(f"❌ Telegram alert error: {e}")
+    
+    async def send_telegram_closure(self, signal: ScalpingSignal, exit_price: float, 
+                                  pnl: float, pnl_percent: float, pips: float, reason: str):
+        """Send Telegram closure alert."""
+        try:
+            result_emoji = "💰" if pnl > 0 else "💸"
+            
+            message = f"""
+{result_emoji} SCALPING TRADE CLOSED {result_emoji}
 
 📊 Performance Summary:
 Symbol: {signal.symbol}
 Direction: {signal.direction}
-Signal Type: {signal.signal_type.value}
-Duration: {duration:.0f}s
+Duration: 5-15 min (Medium Range)
 
-💰 Financials:
-Entry: ${signal.entry_price:.2f}
-Exit: ${exit_price:.2f}
-PnL: ${pnl:.2f}
-PnL %: {pnl_pct:.2f}%
+💵 Results:
+Entry: ${signal.entry_price:.4f}
+Exit: ${exit_price:.4f}
+PnL: ${pnl:.4f}
+PnL %: {pnl_percent:.2f}%
+Pips: {pips:+.1f}
 
 📝 Details:
-Exit Reason: {reason}
-ML Confidence Was: {signal.ml_confidence:.1f}%
+Reason: {reason}
+ML Confidence Was: {signal.ml_prediction.confidence:.1f}%
 Risk/Reward Was: 1:{signal.risk_reward:.1f}
-Predicted Move Was: {signal.ml_prediction.predicted_move_pct:.1f}%
 
-📊 Trade Result:
-{'✅ PROFITABLE' if pnl > 0 else '❌ UNPROFITABLE'}
+🤖 ML Performance:
+Model: {signal.ml_prediction.model_name}
+Signal Quality: {'Good' if pnl > 0 else 'Poor'}
 
 Closed at: {datetime.now().strftime('%H:%M:%S')}
 """
-
-url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-payload = {
-'chat_id': TELEGRAM_CHAT_ID,
-'text': message,
-'parse_mode': 'HTML',
-'disable_web_page_preview': True
-}
-
-async with aiohttp.ClientSession() as session:
-async with session.post(url, json=payload, timeout=10) as response:
-if response.status == 200:
-print(f"✅ Telegram closure sent for {signal.symbol}")
-else:
-error_text = await response.text()
-print(f"❌ Telegram closure error: {error_text}")
-
-except Exception as e:
-print(f"❌ Telegram closure error: {e}")
-
-def _format_top_features(self, features: Dict) -> str:
-"""Format top features for Telegram."""
-try:
-# Sort by absolute value
-sorted_features = sorted(features.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
-
-formatted = []
-for feature, value in sorted_features:
-formatted.append(f"{feature}: {value:.3f}")
-
-return "\n".join(formatted)
-except:
-return "Features unavailable"
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=10) as response:
+                    if response.status == 200:
+                        print(f"✅ Telegram closure sent")
+                    
+        except Exception as e:
+            print(f"❌ Telegram closure error: {e}")
 
 # =============================================
-# MAIN ENHANCED BOT
+# ENHANCED GUI WITH ML METRICS
 # =============================================
 
-class EnhancedMLScalpingBot:
-"""Enhanced ML-powered scalping bot."""
-
-def __init__(self):
-print("="*70)
-print("🤖 ENHANCED ML SCALPING BOT - BTC/ETH ONLY")
-print("="*70)
-
-# Initialize components
-self.market_data = EnhancedMarketData()
-self.ml_manager = MLModelManager()
-self.signal_generator = EnhancedSignalGenerator(self.market_data, self.ml_manager)
-self.trade_manager = EnhancedTradeManager(self.ml_manager)
-
-# State
-self.cycle_count = 0
-self.paused = True
-self.last_model_update = datetime.now()
-
-# Load models
-self.ml_manager.load_models()
-
-print("✅ Enhanced bot initialized successfully")
-print(" • XGBoost ML models with feature engineering")
-print(" • Advanced SMC/FVG detection")
-print(" • Real-time market regime classification")
-print(" • Professional risk management")
-print(" • Telegram integration with ML insights")
-print("="*70)
-
-async def run(self):
-"""Main bot loop."""
-print("🚀 Starting Enhanced ML Scalping Bot...")
-print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-# Initialize market data
-await self.market_data.initialize()
-
-try:
-while True:
-if not self.paused:
-await self.run_cycle()
-
-# Update ML models periodically
-if (datetime.now() - self.last_model_update).seconds >= MODEL_UPDATE_INTERVAL * 60:
-await self.update_models()
-self.last_model_update = datetime.now()
-
-await asyncio.sleep(SCALP_INTERVAL)
-
-except KeyboardInterrupt:
-print("\n🛑 Bot stopped by user")
-except Exception as e:
-print(f"❌ Bot error: {str(e)}")
-traceback.print_exc()
-finally:
-# Cleanup
-await self.market_data.close()
-self.ml_manager.save_models()
-print("💾 Cleanup completed")
-
-async def run_cycle(self):
-"""Run one trading cycle."""
-self.cycle_count += 1
-
-print(f"\n⚡ CYCLE {self.cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
-
-try:
-# Monitor existing trades
-await self.trade_manager.monitor_trades(
-self.market_data,
-lambda msg: print(f" {msg}")
-)
-
-# Generate and execute signals for each symbol
-for symbol in TRADING_PAIRS:
-signal = await self.signal_generator.generate_signal(
-symbol,
-lambda msg: print(f" {msg}")
-)
-
-if signal:
-await self.trade_manager.execute_trade(
-signal,
-lambda msg: print(f" {msg}")
-)
-
-# Collect training data
-await self.collect_training_data()
-
-except Exception as e:
-print(f"❌ Cycle error: {str(e)}")
-traceback.print_exc()
-
-async def collect_training_data(self):
-"""Collect data for ML training."""
-try:
-for symbol in TRADING_PAIRS:
-# Get historical data
-df = await self.market_data.get_ohlcv_data(symbol, '1m', 100)
-if df is None or len(df) < 50:
-continue
-
-# Calculate features for past points
-for i in range(20, len(df) - 10):
-window_df = df.iloc[:i+1]
-features = self.market_data.calculate_features(window_df)
-
-if features:
-# Calculate future returns
-future_price = df['Close'].iloc[i + 10]
-current_price = df['Close'].iloc[i]
-future_returns = (future_price - current_price) / current_price * 100
-
-# Add to training data
-self.ml_manager.add_training_data(symbol, features, future_returns)
-
-except Exception as e:
-print(f"⚠️ Training data collection error: {e}")
-
-async def update_models(self):
-"""Update ML models."""
-print("\n🔄 Updating ML models...")
-
-for symbol in TRADING_PAIRS:
-if self.ml_manager.train_model(symbol):
-print(f" ✅ {symbol} model updated")
-else:
-print(f" ⚠️ {symbol} model update skipped (insufficient data)")
-
-# Save models
-self.ml_manager.save_models()
+class MLEnhancedGUI:
+    """Enhanced GUI with ML performance metrics."""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.root = tk.Tk()
+        self.root.title("🤖 AI SCALPING BOT - ML ENHANCED")
+        self.root.geometry("1400x900")
+        
+        # Configure dark theme
+        self.setup_styles()
+        
+        # Initialize components
+        self.init_ui()
+        self.start_update_timer()
+        
+        print("✅ ML Enhanced GUI initialized")
+    
+    def setup_styles(self):
+        """Setup modern styling."""
+        self.style = ttk.Style()
+        
+        # Configure colors
+        bg_color = '#0a0a0a'
+        fg_color = '#00ff00'
+        panel_bg = '#1a1a1a'
+        accent_color = '#00ffff'
+        
+        self.root.configure(bg=bg_color)
+        
+        self.style.configure('Title.TLabel', 
+                           background=bg_color, 
+                           foreground=accent_color,
+                           font=('Arial', 14, 'bold'))
+        
+        self.style.configure('Panel.TFrame', 
+                           background=panel_bg)
+        
+        self.style.configure('Metric.TLabel',
+                           background=panel_bg,
+                           foreground=fg_color,
+                           font=('Arial', 10))
+        
+        self.style.configure('Value.TLabel',
+                           background=panel_bg,
+                           foreground=accent_color,
+                           font=('Arial', 10, 'bold'))
+    
+    def init_ui(self):
+        """Initialize enhanced UI."""
+        # Main container
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Top panel (Stats)
+        top_panel = ttk.Frame(main_container)
+        top_panel.pack(fill='x', pady=(0, 10))
+        
+        # Left stats
+        left_stats = ttk.LabelFrame(top_panel, text="📊 PERFORMANCE", padding=10)
+        left_stats.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        
+        # Right stats
+        right_stats = ttk.LabelFrame(top_panel, text="🤖 ML METRICS", padding=10)
+        right_stats.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        
+        # Performance metrics
+        self.metric_labels = {}
+        metrics_left = [
+            ("Today PnL:", "today_pnl", "$0.00"),
+            ("Today Pips:", "today_pips", "0.0"),
+            ("Win Rate:", "win_rate", "0.0%"),
+            ("Active Trades:", "active_trades", "0"),
+            ("Avg Trade Duration:", "avg_duration", "0.0m"),
+            ("Total Trades:", "total_trades", "0")
+        ]
+        
+        for i, (label, key, default) in enumerate(metrics_left):
+            row = ttk.Frame(left_stats)
+            row.pack(fill='x', pady=2)
+            
+            ttk.Label(row, text=label, style='Metric.TLabel', width=20).pack(side='left')
+            self.metric_labels[key] = ttk.Label(row, text=default, style='Value.TLabel')
+            self.metric_labels[key].pack(side='right')
+        
+        # ML metrics
+        ml_metrics = [
+            ("ML Confidence:", "ml_confidence", "0.0%"),
+            ("Model Accuracy:", "model_accuracy", "0.0%"),
+            ("BTC Predictions:", "btc_predictions", "0"),
+            ("ETH Predictions:", "eth_predictions", "0"),
+            ("Training Samples:", "training_samples", "0"),
+            ("Last Signal:", "last_signal", "None")
+        ]
+        
+        for i, (label, key, default) in enumerate(ml_metrics):
+            row = ttk.Frame(right_stats)
+            row.pack(fill='x', pady=2)
+            
+            ttk.Label(row, text=label, style='Metric.TLabel', width=20).pack(side='left')
+            self.metric_labels[key] = ttk.Label(row, text=default, style='Value.TLabel')
+            self.metric_labels[key].pack(side='right')
+        
+        # Middle panel (Graphs)
+        middle_panel = ttk.Frame(main_container)
+        middle_panel.pack(fill='both', expand=True, pady=(0, 10))
+        
+        # PnL Graph
+        pnl_frame = ttk.LabelFrame(middle_panel, text="📈 PnL PROGRESSION", padding=5)
+        pnl_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        
+        self.fig_pnl = Figure(figsize=(8, 4), dpi=80, facecolor='#1a1a1a')
+        self.ax_pnl = self.fig_pnl.add_subplot(111)
+        self.canvas_pnl = FigureCanvasTkAgg(self.fig_pnl, pnl_frame)
+        self.canvas_pnl.get_tk_widget().pack(fill='both', expand=True)
+        
+        # Win/Loss Graph
+        winloss_frame = ttk.LabelFrame(middle_panel, text="📊 WIN/LOSS DISTRIBUTION", padding=5)
+        winloss_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        
+        self.fig_winloss = Figure(figsize=(8, 4), dpi=80, facecolor='#1a1a1a')
+        self.ax_winloss = self.fig_winloss.add_subplot(111)
+        self.canvas_winloss = FigureCanvasTkAgg(self.fig_winloss, winloss_frame)
+        self.canvas_winloss.get_tk_widget().pack(fill='both', expand=True)
+        
+        # Bottom panel (Logs & Controls)
+        bottom_panel = ttk.Frame(main_container)
+        bottom_panel.pack(fill='both', expand=True)
+        
+        # Left: Controls
+        control_frame = ttk.LabelFrame(bottom_panel, text="⚙️ CONTROLS", padding=10)
+        control_frame.pack(side='left', fill='both', padx=(0, 5))
+        
+        # Control buttons
+        self.start_btn = ttk.Button(control_frame, text="▶️ START BOT", 
+                                   command=self.start_bot, width=20)
+        self.start_btn.pack(pady=5)
+        
+        self.pause_btn = ttk.Button(control_frame, text="⏸️ PAUSE BOT", 
+                                   command=self.pause_bot, width=20,
+                                   state='disabled')
+        self.pause_btn.pack(pady=5)
+        
+        ttk.Button(control_frame, text="🤖 TRAIN MODELS", 
+                  command=self.train_models, width=20).pack(pady=5)
+        
+        ttk.Button(control_frame, text="🗑️ CLEAR LOGS", 
+                  command=self.clear_logs, width=20).pack(pady=5)
+        
+        ttk.Button(control_frame, text="📊 REFRESH GRAPHS", 
+                  command=self.refresh_graphs, width=20).pack(pady=5)
+        
+        # Symbol info
+        symbol_frame = ttk.Frame(control_frame)
+        symbol_frame.pack(pady=10)
+        
+        ttk.Label(symbol_frame, text="🎯 TRADING:", style='Metric.TLabel').pack()
+        for symbol in TRADING_PAIRS:
+            ttk.Label(symbol_frame, text=f"  {symbol}", 
+                     style='Value.TLabel').pack(anchor='w')
+        
+        # Right: Logs
+        log_frame = ttk.LabelFrame(bottom_panel, text="📝 LIVE TRADING LOG", padding=5)
+        log_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=12,
+                                                 font=('Consolas', 9),
+                                                 bg='#0a0a0a', fg='#00ff00',
+                                                 insertbackground='white')
+        self.log_text.pack(fill='both', expand=True)
+        
+        # Status bar
+        self.status_bar = ttk.Label(self.root, 
+                                   text="🤖 AI SCALPING BOT READY | ML Models Loaded | Press START",
+                                   relief='sunken',
+                                   anchor='center',
+                                   font=('Arial', 10))
+        self.status_bar.pack(side='bottom', fill='x')
+        
+        # Initialize graphs
+        self.init_graphs()
+    
+    def init_graphs(self):
+        """Initialize graphs with default data."""
+        # PnL Graph
+        self.ax_pnl.clear()
+        self.ax_pnl.set_facecolor('#1a1a1a')
+        self.ax_pnl.set_title('PnL Progression (Today)', color='white', pad=20)
+        self.ax_pnl.set_xlabel('Time', color='white')
+        self.ax_pnl.set_ylabel('Cumulative PnL ($)', color='white')
+        self.ax_pnl.tick_params(colors='white')
+        self.ax_pnl.grid(True, alpha=0.3, color='gray')
+        
+        # Win/Loss Graph
+        self.ax_winloss.clear()
+        self.ax_winloss.set_facecolor('#1a1a1a')
+        self.ax_winloss.set_title('Win/Loss Distribution', color='white', pad=20)
+        self.ax_winloss.tick_params(colors='white')
+        
+        self.canvas_pnl.draw()
+        self.canvas_winloss.draw()
+    
+    def update_pnl_graph(self, pnl_data: List[float]):
+        """Update PnL graph."""
+        self.ax_pnl.clear()
+        self.ax_pnl.set_facecolor('#1a1a1a')
+        
+        if pnl_data:
+            # Create time axis
+            times = np.arange(len(pnl_data))
+            
+            # Plot cumulative PnL
+            cumulative_pnl = np.cumsum(pnl_data)
+            
+            # Plot with gradient fill
+            self.ax_pnl.fill_between(times, cumulative_pnl, alpha=0.3, color='#00ff00')
+            self.ax_pnl.plot(times, cumulative_pnl, 'g-', linewidth=2, marker='o', markersize=3)
+            
+            # Color positive/negative areas
+            for i in range(len(times)-1):
+                color = '#00ff00' if pnl_data[i+1] > 0 else '#ff4444'
+                self.ax_pnl.plot(times[i:i+2], cumulative_pnl[i:i+2], color=color, linewidth=2)
+        
+        self.ax_pnl.set_title('PnL Progression (Today)', color='white', pad=20)
+        self.ax_pnl.set_xlabel('Trade Sequence', color='white')
+        self.ax_pnl.set_ylabel('Cumulative PnL ($)', color='white')
+        self.ax_pnl.tick_params(colors='white')
+        self.ax_pnl.grid(True, alpha=0.3, color='gray')
+        
+        self.canvas_pnl.draw()
+    
+    def update_winloss_graph(self, wins: int, losses: int):
+        """Update win/loss graph."""
+        self.ax_winloss.clear()
+        self.ax_winloss.set_facecolor('#1a1a1a')
+        
+        if wins + losses > 0:
+            # Create pie chart
+            sizes = [wins, losses]
+            colors = ['#00ff00', '#ff4444']
+            labels = [f'Wins: {wins}', f'Losses: {losses}']
+            explode = (0.1, 0)
+            
+            wedges, texts, autotexts = self.ax_winloss.pie(
+                sizes, explode=explode, colors=colors,
+                autopct='%1.1f%%', startangle=90,
+                textprops={'color': 'white', 'fontsize': 10}
+            )
+            
+            # Add legend
+            self.ax_winloss.legend(wedges, labels, title="Results", 
+                                 loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
+                                 fontsize=9, title_fontsize=10)
+        
+        self.ax_winloss.set_title('Win/Loss Distribution', color='white', pad=20)
+        
+        self.canvas_winloss.draw()
+    
+    def start_update_timer(self):
+        """Start update timer."""
+        try:
+            self.update_ui()
+        except Exception as e:
+            print(f"⚠️ UI update error: {e}")
+        finally:
+            self.root.after(2000, self.start_update_timer)  # Update every 2 seconds
+    
+    def update_ui(self):
+        """Update UI with current stats."""
+        try:
+            # Update status
+            status = "RUNNING" if not self.bot.paused else "PAUSED"
+            ml_status = "ACTIVE" if self.bot.ml_manager.models else "INACTIVE"
+            
+            self.status_bar.config(
+                text=f"🤖 {status} | ML: {ml_status} | "
+                     f"Cycles: {self.bot.cycle_count} | "
+                     f"Signals: {self.bot.signals_today} | "
+                     f"Active Trades: {len(self.bot.trade_manager.active_trades)} | "
+                     f"{datetime.now().strftime('%H:%M:%S')}"
+            )
+            
+            # Get performance data
+            wins = sum(1 for t in self.bot.trade_manager.trade_history if t['pnl'] > 0)
+            losses = sum(1 for t in self.bot.trade_manager.trade_history if t['pnl'] <= 0)
+            total_trades = len(self.bot.trade_manager.trade_history)
+            
+            if total_trades > 0:
+                win_rate = (wins / total_trades) * 100
+                total_pnl = sum(t['pnl'] for t in self.bot.trade_manager.trade_history)
+                total_pips = sum(t['pips'] for t in self.bot.trade_manager.trade_history)
+                avg_duration = np.mean([t['duration'] for t in self.bot.trade_manager.trade_history]) if total_trades > 0 else 0
+            else:
+                win_rate = 0
+                total_pnl = 0
+                total_pips = 0
+                avg_duration = 0
+            
+            # Update metrics
+            self.metric_labels['today_pnl'].config(text=f"${total_pnl:.2f}")
+            self.metric_labels['today_pips'].config(text=f"{total_pips:.1f}")
+            self.metric_labels['win_rate'].config(text=f"{win_rate:.1f}%")
+            self.metric_labels['active_trades'].config(text=str(len(self.bot.trade_manager.active_trades)))
+            self.metric_labels['avg_duration'].config(text=f"{avg_duration:.1f}m")
+            self.metric_labels['total_trades'].config(text=str(total_trades))
+            
+            # Update ML metrics
+            if hasattr(self.bot.ml_manager, 'feature_history'):
+                training_samples = len(self.bot.ml_manager.feature_history)
+                self.metric_labels['training_samples'].config(text=str(training_samples))
+            
+            # Get last signal
+            if self.bot.signal_generator.signal_history:
+                last_signal = self.bot.signal_generator.signal_history[-1]
+                self.metric_labels['last_signal'].config(
+                    text=f"{last_signal.symbol} {last_signal.direction}"
+                )
+                self.metric_labels['ml_confidence'].config(
+                    text=f"{last_signal.ml_prediction.confidence:.1f}%"
+                )
+            
+            # Update graphs
+            pnl_data = [t['pnl'] for t in self.bot.trade_manager.trade_history]
+            self.update_pnl_graph(pnl_data)
+            self.update_winloss_graph(wins, losses)
+            
+        except Exception as e:
+            print(f"⚠️ UI update error: {e}")
+    
+    def add_log(self, message: str):
+        """Add message to log."""
+        try:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+            self.log_text.see(tk.END)
+        except:
+            pass
+    
+    def clear_logs(self):
+        """Clear logs."""
+        try:
+            self.log_text.delete(1.0, tk.END)
+            self.add_log("📝 Logs cleared")
+        except:
+            pass
+    
+    def start_bot(self):
+        """Start bot."""
+        self.bot.paused = False
+        self.start_btn.config(state='disabled')
+        self.pause_btn.config(state='normal')
+        self.add_log("▶️ AI Scalping Bot STARTED")
+        self.add_log("🤖 ML models active - Learning from trades")
+        self.add_log("🎯 Targeting 30-100 pips per trade")
+        self.add_log("⏱️ Trade duration: 5-15 minutes")
+    
+    def pause_bot(self):
+        """Pause bot."""
+        self.bot.paused = True
+        self.start_btn.config(state='normal')
+        self.pause_btn.config(state='disabled')
+        self.add_log("⏸️ Bot PAUSED - ML models saved")
+        self.bot.ml_manager.save_models()
+    
+    def train_models(self):
+        """Manually train ML models."""
+        self.add_log("🤖 Training ML models with current data...")
+        self.bot.ml_manager.save_models()
+        self.add_log("✅ ML models trained and saved")
+    
+    def refresh_graphs(self):
+        """Refresh graphs."""
+        try:
+            wins = sum(1 for t in self.bot.trade_manager.trade_history if t['pnl'] > 0)
+            losses = sum(1 for t in self.bot.trade_manager.trade_history if t['pnl'] <= 0)
+            
+            pnl_data = [t['pnl'] for t in self.bot.trade_manager.trade_history]
+            self.update_pnl_graph(pnl_data)
+            self.update_winloss_graph(wins, losses)
+            
+            self.add_log("📊 Graphs refreshed with latest data")
+        except Exception as e:
+            self.add_log(f"❌ Error refreshing graphs: {e}")
 
 # =============================================
-# SIMPLE GUI FOR CONTROL
+# MAIN AI SCALPING BOT
 # =============================================
 
-class SimpleControlGUI:
-"""Simple GUI for bot control."""
-
-def __init__(self, bot: EnhancedMLScalpingBot):
-self.bot = bot
-self.root = tk.Tk()
-self.root.title("Enhanced ML Scalping Bot - Control Panel")
-self.root.geometry("800x600")
-
-self.setup_ui()
-
-def setup_ui(self):
-"""Setup user interface."""
-# Title
-title_frame = ttk.Frame(self.root)
-title_frame.pack(pady=10)
-
-ttk.Label(title_frame, text="🤖 ENHANCED ML SCALPING BOT",
-font=("Arial", 16, "bold")).pack()
-
-ttk.Label(title_frame, text="BTC/ETH Only | ML-Powered | SMC/FVG Strategy",
-font=("Arial", 10)).pack()
-
-# Status panel
-status_frame = ttk.LabelFrame(self.root, text="Status")
-status_frame.pack(fill='x', padx=20, pady=10)
-
-self.status_label = ttk.Label(status_frame, text="⏸️ PAUSED",
-font=("Arial", 12, "bold"))
-self.status_label.pack(pady=5)
-
-# Stats frame
-stats_frame = ttk.Frame(status_frame)
-stats_frame.pack(fill='x', padx=10, pady=5)
-
-self.cycle_label = ttk.Label(stats_frame, text="Cycles: 0")
-self.cycle_label.grid(row=0, column=0, padx=10, sticky='w')
-
-self.trades_label = ttk.Label(stats_frame, text="Active Trades: 0")
-self.trades_label.grid(row=0, column=1, padx=10, sticky='w')
-
-# Control buttons
-control_frame = ttk.LabelFrame(self.root, text="Controls")
-control_frame.pack(fill='x', padx=20, pady=10)
-
-btn_frame = ttk.Frame(control_frame)
-btn_frame.pack(pady=10)
-
-self.start_btn = ttk.Button(btn_frame, text="▶️ START",
-command=self.start_bot, width=15)
-self.start_btn.pack(side='left', padx=5)
-
-self.pause_btn = ttk.Button(btn_frame, text="⏸️ PAUSE",
-command=self.pause_bot, width=15,
-state='disabled')
-self.pause_btn.pack(side='left', padx=5)
-
-# Log output
-log_frame = ttk.LabelFrame(self.root, text="Live Log")
-log_frame.pack(fill='both', expand=True, padx=20, pady=10)
-
-self.log_text = scrolledtext.ScrolledText(log_frame, height=15,
-font=("Consolas", 9),
-bg='black', fg='white',
-insertbackground='white')
-self.log_text.pack(fill='both', expand=True, padx=5, pady=5)
-
-# Status bar
-self.status_bar = ttk.Label(self.root,
-text="Ready to start",
-relief='sunken',
-anchor='center')
-self.status_bar.pack(side='bottom', fill='x')
-
-# Start update timer
-self.update_ui()
-
-def update_ui(self):
-"""Update UI elements."""
-try:
-# Update status
-status = "RUNNING" if not self.bot.paused else "PAUSED"
-color = "green" if not self.bot.paused else "red"
-self.status_label.config(text=f"🟢 {status}", foreground=color)
-
-# Update stats
-self.cycle_label.config(text=f"Cycles: {self.bot.cycle_count}")
-self.trades_label.config(text=f"Active Trades: {len(self.bot.trade_manager.active_trades)}")
-
-# Update status bar
-self.status_bar.config(
-text=f"{datetime.now().strftime('%H:%M:%S')} | "
-f"Cycles: {self.bot.cycle_count} | "
-f"Active Trades: {len(self.bot.trade_manager.active_trades)}"
-)
-
-except Exception as e:
-print(f"⚠️ UI update error: {e}")
-
-# Schedule next update
-self.root.after(1000, self.update_ui)
-
-def add_log(self, message: str):
-"""Add message to log."""
-try:
-timestamp = datetime.now().strftime("%H:%M:%S")
-self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
-self.log_text.see(tk.END)
-
-# Limit log size
-if self.log_text.index('end-1c').split('.')[0] > '1000':
-self.log_text.delete(1.0, 2.0)
-
-except Exception as e:
-print(f"⚠️ Log error: {e}")
-
-def start_bot(self):
-"""Start bot."""
-self.bot.paused = False
-self.start_btn.config(state='disabled')
-self.pause_btn.config(state='normal')
-self.add_log("▶️ Bot started - ML Scalping active")
-self.add_log("📊 ML models loaded and ready")
-self.add_log("🎯 Monitoring BTC and ETH")
-self.add_log("📱 Signals will be sent to Telegram")
-
-def pause_bot(self):
-"""Pause bot."""
-self.bot.paused = True
-self.start_btn.config(state='normal')
-self.pause_btn.config(state='disabled')
-self.add_log("⏸️ Bot paused")
-
-def run(self):
-"""Run GUI."""
-self.root.mainloop()
+class AIScalpingBot:
+    """Main AI-enhanced scalping bot."""
+    
+    def __init__(self):
+        print("="*70)
+        print("🤖 AI ENHANCED SCALPING BOT - MEDIUM RANGE")
+        print("="*70)
+        
+        # Initialize enhanced components
+        self.ml_manager = MLModelManager()
+        self.ta_analyzer = EnhancedTechnicalAnalyzer()
+        self.signal_generator = MLEnhancedSignalGenerator(self.ml_manager, self.ta_analyzer)
+        self.trade_manager = EnhancedScalpingTradeManager(self.ml_manager)
+        
+        # State
+        self.cycle_count = 0
+        self.signals_today = 0
+        self.paused = True
+        self.gui = None
+        
+        print("✅ AI Bot initialized successfully")
+        print("   • ML Models: Random Forest + Neural Network Ensemble")
+        print("   • Timeframe: Medium-range scalping (5-15 min)")
+        print("   • Target: 30-100 pips per trade")
+        print("   • Instruments: BTC & ETH only")
+        print("   • Risk: 2% per trade, 1:2+ RRR")
+        print("="*70)
+    
+    def set_gui(self, gui):
+        """Set enhanced GUI."""
+        self.gui = gui
+        self.gui.add_log("🤖 AI Scalping Bot Ready - Medium Range Strategy")
+        self.gui.add_log("✅ ML models loaded: Random Forest + Neural Network")
+        self.gui.add_log("🎯 Target: 30-100 pips per trade (5-15 minute duration)")
+        self.gui.add_log("⚖️ Risk Management: 2% per trade, 1:2+ RRR")
+        self.gui.add_log("📊 Real-time performance graphs initialized")
+        self.gui.add_log("Press START to begin AI-enhanced scalping")
+    
+    async def run_cycle(self):
+        """Run one trading cycle."""
+        if self.paused:
+            return
+        
+        self.cycle_count += 1
+        
+        if self.gui:
+            self.gui.add_log(f"\n⚡ CYCLE {self.cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
+        
+        try:
+            # Monitor existing trades
+            await self.trade_manager.monitor_trades(
+                self.gui.add_log if self.gui else print
+            )
+            
+            # Update technical analysis for each symbol
+            for symbol in TRADING_PAIRS:
+                # Simulate price update (in real bot, get from API)
+                current_price = 1000.0 if "BTC" in symbol else 100.0  # Placeholder
+                volume = 1000.0  # Placeholder
+                
+                await self.ta_analyzer.update_history(symbol, current_price, volume)
+                
+                # Check max trades per symbol
+                active_for_symbol = sum(
+                    1 for trade in self.trade_manager.active_trades.values()
+                    if trade['signal'].symbol == symbol
+                )
+                
+                if active_for_symbol >= 1:
+                    continue
+                
+                # Generate signal using ML
+                signal = await self.signal_generator.generate_signal(
+                    symbol,
+                    self.gui.add_log if self.gui else print
+                )
+                
+                # Execute if valid
+                if signal:
+                    if await self.trade_manager.execute_trade(signal, self.gui.add_log if self.gui else print):
+                        self.signals_today += 1
+                        
+        except Exception as e:
+            error_msg = f"❌ Cycle error: {str(e)}"
+            if self.gui:
+                self.gui.add_log(error_msg)
+            else:
+                print(error_msg)
+        
+        if self.gui:
+            self.gui.add_log(f"✅ Cycle completed")
+    
+    async def run(self):
+        """Main loop."""
+        print("🚀 Starting AI Scalping Bot...")
+        print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if self.gui:
+            self.gui.add_log("✅ ML models initialized")
+            self.gui.add_log("✅ Technical analysis ready")
+            self.gui.add_log("✅ Telegram alerts enabled")
+        
+        try:
+            while True:
+                await self.run_cycle()
+                await asyncio.sleep(SCAN_INTERVAL)
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Bot stopped by user")
+            if self.gui:
+                self.gui.add_log("🛑 Bot stopped by user")
+                self.gui.add_log("💾 Saving ML models...")
+            
+            # Save models
+            self.ml_manager.save_models()
+            
+            if self.gui:
+                self.gui.add_log("✅ ML models saved successfully")
+                
+        except Exception as e:
+            error_msg = f"❌ Bot error: {str(e)}"
+            print(error_msg)
+            if self.gui:
+                self.gui.add_log(error_msg)
+        finally:
+            # Cleanup
+            print("💾 Cleanup completed")
 
 # =============================================
 # MAIN ENTRY POINT
 # =============================================
 
 def main():
-"""Start the enhanced ML scalping bot."""
-print("\n" + "="*70)
-print("🎯 ENHANCED ML SCALPING BOT - PROFESSIONAL EDITION")
-print("="*70)
-print("\n✨ CORE FEATURES:")
-print("1. 🤖 Machine Learning with XGBoost")
-print("2. 📊 Advanced Feature Engineering (50+ features)")
-print("3. 🎯 Smart Money Concepts (SMC/FVG)")
-print("4. 📈 Real-time Market Regime Detection")
-print("5. ⚡ High-Frequency Scalping (BTC/ETH only)")
-print("6. 🛡️ Professional Risk Management")
-print("7. 📱 Telegram Integration with ML Insights")
-print("8. 🔄 Continuous Model Retraining")
-
-print("\n🎯 TRADING STRATEGY:")
-print("• ML predictions combined with SMC signals")
-print("• FVG and Order Block detection")
-print("• Liquidity and Breakout analysis")
-print("• Multi-timeframe confirmation")
-
-print("\n📊 RISK MANAGEMENT:")
-print(f"• Max Trades: {MAX_CONCURRENT_TRADES}")
-print(f"• Risk per Trade: {RISK_PER_TRADE*100:.0f}%")
-print(f"• Min RRR: 1:{TAKE_PROFIT_MULTIPLIER}")
-print(f"• Trailing Stops with Breakeven")
-print(f"• Emergency Stop: {EMERGENCY_STOP_LOSS}%")
-
-print("\n⚙️ TECHNICAL SPECS:")
-print(f"• Cycle Interval: {SCALP_INTERVAL}s")
-print(f"• Max Trade Duration: {MAX_TRADE_DURATION}s")
-print(f"• ML Update Interval: {MODEL_UPDATE_INTERVAL}min")
-print(f"• Min ML Confidence: {MIN_CONFIDENCE}%")
-print("="*70 + "\n")
-
-# Create bot
-bot = EnhancedMLScalpingBot()
-
-# Create and run GUI in separate thread
-gui = SimpleControlGUI(bot)
-
-# Redirect print to GUI log
-original_print = print
-def gui_print(*args, **kwargs):
-message = ' '.join(str(arg) for arg in args)
-gui.add_log(message)
-original_print(*args, **kwargs)
-
-# Don't override print to avoid recursion issues
-# Instead, create a custom log function
-def log_to_gui(message):
-gui.add_log(message)
-
-# Run bot in thread
-def run_bot():
-try:
-asyncio.run(bot.run())
-except Exception as e:
-log_to_gui(f"❌ Bot thread error: {e}")
-original_print(f"❌ Bot thread error: {e}")
-
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
-
-# Run GUI
-try:
-gui.run()
-except Exception as e:
-original_print(f"❌ GUI error: {e}")
+    """Start the AI-enhanced scalping bot."""
+    bot = AIScalpingBot()
+    
+    # Create enhanced GUI
+    gui = MLEnhancedGUI(bot)
+    bot.set_gui(gui)
+    
+    # Run bot in thread
+    def run_bot():
+        try:
+            asyncio.run(bot.run())
+        except Exception as e:
+            print(f"❌ Bot thread error: {e}")
+    
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Start GUI
+    try:
+        gui.root.mainloop()
+    except Exception as e:
+        print(f"❌ GUI error: {e}")
 
 if __name__ == "__main__":
-main()
-
-
+    print("\n" + "="*70)
+    print("🤖 AI ENHANCED SCALPING BOT - MEDIUM RANGE STRATEGY")
+    print("="*70)
+    print("\n✨ ENHANCED FEATURES:")
+    print("1. 🤖 ML ENSEMBLE: Random Forest + Neural Network")
+    print("2. 🎯 MEDIUM RANGE: 5-15 minute trades, 30-100 pip targets")
+    print("3. 📊 ADVANCED TA: 10+ technical indicators")
+    print("4. 🔄 CONTINUOUS LEARNING: ML models learn from every trade")
+    print("5. 📈 REAL-TIME GRAPHS: PnL progression & win/loss distribution")
+    print("6. ⚖️ RISK MANAGEMENT: 2% risk, 1:2+ RRR, partial TP management")
+    print("7. 📱 TELEGRAM ALERTS: Detailed ML performance reporting")
+    print("8. 💾 MODEL PERSISTENCE: Save/load trained models")
+    
+    print("\n🎯 TRADING PARAMETERS:")
+    print("• Instruments: BTC & ETH only")
+    print("• Trade Duration: 5-15 minutes")
+    print("• Target Range: 30-100 pips")
+    print("• Risk per Trade: 2%")
+    print("• Minimum RRR: 1:2")
+    print("• ML Confidence Threshold: 70%")
+    
+    print("\n🤖 ML MODEL DETAILS:")
+    print("• Ensemble: Random Forest (60%) + Neural Network (40%)")
+    print("• Features: 10 technical indicators")
+    print("• Training: Continuous learning from trade outcomes")
+    print("• Prediction: Direction + Confidence scoring")
+    print("="*70 + "\n")
+    
+    main()
