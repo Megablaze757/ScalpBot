@@ -36,17 +36,22 @@ import pickle
 warnings.filterwarnings('ignore')
 
 # =============================================
-# =============================================
 # CONFIGURATION - YOUR NEW OFFICIAL TOKEN
 # =============================================
 TELEGRAM_BOT_TOKEN = "8285366409:AAH9kdy1D-xULBmGakAPFYUME19fmVCDJ9E"
 TELEGRAM_CHAT_ID = "-1003525746518"  # Keep your existing chat ID
+
 # Trading Parameters
 SCAN_INTERVAL = 3  # 3 seconds for fast scanning
 MAX_CONCURRENT_TRADES = 2
 MAX_TRADE_DURATION = 900  # 15 minutes
 MIN_CONFIDENCE = 70  # ML model confidence threshold
 RISK_PER_TRADE = 0.02  # 2% risk per trade
+
+# Analysis Mode: "ML" or "TECHNICAL"
+ANALYSIS_MODE = "ML"  # Change this to "TECHNICAL" for pure technical analysis
+TEST_MODE = True  # Set to False for production
+MIN_SAMPLES_FOR_ML = 50  # Minimum samples before using ML
 
 # Only BTC and ETH
 TRADING_PAIRS = [
@@ -123,6 +128,17 @@ class MLPrediction:
     model_name: str
 
 @dataclass
+class TechnicalPrediction:
+    """Pure technical analysis prediction."""
+    direction: str  # "LONG", "SHORT", "NEUTRAL"
+    confidence: float
+    rsi_signal: str
+    macd_signal: str
+    bb_signal: str
+    volume_signal: str
+    reason: str
+
+@dataclass
 class ScalpingSignal:
     """Scalping signal with ML enhancement."""
     signal_id: str
@@ -136,11 +152,12 @@ class ScalpingSignal:
     confidence: float
     risk_reward: float
     position_size: float
-    ml_prediction: MLPrediction
-    market_state: MarketState
-    reason: str
-    created_at: datetime
-    expiry: datetime
+    ml_prediction: Optional[MLPrediction] = None
+    technical_prediction: Optional[TechnicalPrediction] = None
+    market_state: Optional[MarketState] = None
+    reason: str = ""
+    created_at: datetime = None
+    expiry: datetime = None
     status: str = "PENDING"
     
     def calculate_pips(self) -> Tuple[float, float]:
@@ -169,6 +186,7 @@ class MLModelManager:
         self.feature_history = deque(maxlen=1000)
         self.labels_history = deque(maxlen=1000)
         self.init_models()
+        self.initialize_with_sample_data()
     
     def init_models(self):
         """Initialize ML models."""
@@ -219,6 +237,47 @@ class MLModelManager:
         self.scalers[symbol] = StandardScaler()
         
         print(f"✅ Created new ML model for {symbol}")
+    
+    def initialize_with_sample_data(self):
+        """Initialize models with sample data."""
+        print("🤖 Initializing ML models with sample data...")
+        for symbol in TRADING_PAIRS:
+            # Generate synthetic training data
+            n_samples = 200
+            
+            # Generate realistic features
+            features = []
+            labels = []
+            
+            for _ in range(n_samples):
+                # Generate realistic feature values
+                feature = np.array([
+                    np.random.uniform(30, 70),  # RSI
+                    np.random.uniform(-2, 2),   # MACD
+                    np.random.uniform(-1, 1),   # MACD Hist
+                    np.random.uniform(0.01, 0.05),  # BB Width
+                    np.random.uniform(0.001, 0.01),  # ATR/Price
+                    np.random.uniform(0.5, 2),   # Volume Ratio
+                    np.random.uniform(-5, 5),    # Momentum
+                    np.random.uniform(0.5, 3),   # Volatility
+                    np.random.uniform(-2, 2),    # Price position in BB
+                    np.random.uniform(-5, 5)     # OBV
+                ])
+                
+                # Random label with 55% accuracy bias
+                if np.random.random() > 0.45:
+                    label = 1  # Win
+                else:
+                    label = 0  # Loss
+                    
+                features.append(feature)
+                labels.append(label)
+            
+            # Train model with initial data
+            if len(features) > 50:
+                self.train_model(symbol, np.array(features), np.array(labels))
+        
+        print("✅ ML models initialized with sample data")
     
     def save_models(self):
         """Save ML models to disk."""
@@ -325,6 +384,52 @@ class MLModelManager:
             label_array = np.array(self.labels_history)
             self.train_model(symbol, feature_array, label_array)
             self.save_models()
+
+# =============================================
+# SYNTHETIC MARKET DATA GENERATOR
+# =============================================
+
+class SyntheticMarketData:
+    """Generate synthetic market data for testing."""
+    
+    def __init__(self):
+        self.price_base = {
+            "BTC-USD": 50000.0,
+            "ETH-USD": 3000.0
+        }
+        self.price_trend = {
+            "BTC-USD": 1.0,
+            "ETH-USD": 1.0
+        }
+        self.volatility = {
+            "BTC-USD": 0.02,  # 2% daily volatility
+            "ETH-USD": 0.03   # 3% daily volatility
+        }
+    
+    def generate_price(self, symbol: str) -> float:
+        """Generate realistic price with trend and noise."""
+        base = self.price_base[symbol]
+        volatility = self.volatility[symbol]
+        
+        # Random walk with drift
+        drift = np.random.normal(0.0001, 0.0005)  # Small drift
+        noise = np.random.normal(0, volatility / np.sqrt(252))  # Daily volatility
+        
+        # Update trend
+        self.price_trend[symbol] *= (1 + drift + noise)
+        
+        # Ensure price doesn't go crazy
+        self.price_trend[symbol] = np.clip(
+            self.price_trend[symbol], 
+            0.8,  # Max 20% drop
+            1.2   # Max 20% gain
+        )
+        
+        return base * self.price_trend[symbol]
+    
+    def generate_volume(self) -> float:
+        """Generate realistic volume."""
+        return np.random.uniform(1000, 10000)
 
 # =============================================
 # ENHANCED TECHNICAL ANALYSIS
@@ -529,9 +634,127 @@ class EnhancedTechnicalAnalyzer:
         avg_volume = np.mean(volumes[-10:])
         
         return float(current_volume / avg_volume) if avg_volume > 0 else 1.0
+    
+    def analyze_technical_signals(self, indicators: Dict) -> TechnicalPrediction:
+        """Analyze technical indicators to generate prediction."""
+        current_price = indicators['current_price']
+        
+        # Analyze RSI
+        rsi = indicators['rsi']
+        if rsi < 30:
+            rsi_signal = "OVERSOLD"
+            rsi_direction = "LONG"
+            rsi_strength = (30 - rsi) / 30 * 100
+        elif rsi > 70:
+            rsi_signal = "OVERBOUGHT"
+            rsi_direction = "SHORT"
+            rsi_strength = (rsi - 70) / 30 * 100
+        elif 30 <= rsi <= 50:
+            rsi_signal = "NEUTRAL_TO_BULLISH"
+            rsi_direction = "LONG"
+            rsi_strength = (50 - rsi) / 20 * 50
+        elif 50 <= rsi <= 70:
+            rsi_signal = "NEUTRAL_TO_BEARISH"
+            rsi_direction = "SHORT"
+            rsi_strength = (rsi - 50) / 20 * 50
+        else:
+            rsi_signal = "NEUTRAL"
+            rsi_direction = "NEUTRAL"
+            rsi_strength = 0
+        
+        # Analyze MACD
+        macd_hist = indicators['macd_histogram']
+        macd = indicators['macd']
+        signal = indicators['macd_signal']
+        
+        if macd_hist > 0 and macd > signal:
+            macd_signal = "BULLISH"
+            macd_direction = "LONG"
+            macd_strength = abs(macd_hist) * 100
+        elif macd_hist < 0 and macd < signal:
+            macd_signal = "BEARISH"
+            macd_direction = "SHORT"
+            macd_strength = abs(macd_hist) * 100
+        else:
+            macd_signal = "NEUTRAL"
+            macd_direction = "NEUTRAL"
+            macd_strength = 0
+        
+        # Analyze Bollinger Bands
+        bb_upper = indicators['bb_upper']
+        bb_middle = indicators['bb_middle']
+        bb_lower = indicators['bb_lower']
+        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if bb_upper != bb_lower else 0.5
+        
+        if current_price < bb_lower * 1.01:
+            bb_signal = "OVERSOLD"
+            bb_direction = "LONG"
+            bb_strength = ((bb_lower * 1.01 - current_price) / bb_lower) * 200
+        elif current_price > bb_upper * 0.99:
+            bb_signal = "OVERBOUGHT"
+            bb_direction = "SHORT"
+            bb_strength = ((current_price - bb_upper * 0.99) / bb_upper) * 200
+        elif bb_position < 0.3:
+            bb_signal = "LOWER_BAND"
+            bb_direction = "LONG"
+            bb_strength = (0.3 - bb_position) * 100
+        elif bb_position > 0.7:
+            bb_signal = "UPPER_BAND"
+            bb_direction = "SHORT"
+            bb_strength = (bb_position - 0.7) * 100
+        else:
+            bb_signal = "MIDDLE_BAND"
+            bb_direction = "NEUTRAL"
+            bb_strength = 0
+        
+        # Analyze Volume
+        volume_ratio = indicators['volume_ratio']
+        if volume_ratio > 1.5:
+            volume_signal = "HIGH_VOLUME"
+            volume_strength = min(100, (volume_ratio - 1) * 50)
+        elif volume_ratio < 0.5:
+            volume_signal = "LOW_VOLUME"
+            volume_strength = min(100, (1 - volume_ratio) * 50)
+        else:
+            volume_signal = "NORMAL_VOLUME"
+            volume_strength = 0
+        
+        # Combine signals
+        signals = {
+            "LONG": 0,
+            "SHORT": 0,
+            "NEUTRAL": 0
+        }
+        
+        # Weight the signals
+        signals[rsi_direction] += rsi_strength * 0.3
+        signals[macd_direction] += macd_strength * 0.4
+        signals[bb_direction] += bb_strength * 0.3
+        
+        # Determine final direction
+        if signals["LONG"] > 50 and signals["LONG"] > signals["SHORT"] * 1.5:
+            direction = "LONG"
+            confidence = min(100, signals["LONG"])
+        elif signals["SHORT"] > 50 and signals["SHORT"] > signals["LONG"] * 1.5:
+            direction = "SHORT"
+            confidence = min(100, signals["SHORT"])
+        else:
+            direction = "NEUTRAL"
+            confidence = 0
+        
+        # Create technical prediction
+        return TechnicalPrediction(
+            direction=direction,
+            confidence=confidence,
+            rsi_signal=rsi_signal,
+            macd_signal=macd_signal,
+            bb_signal=bb_signal,
+            volume_signal=volume_signal,
+            reason=f"RSI: {rsi_signal} ({rsi:.1f}), MACD: {macd_signal}, BB: {bb_signal}, Volume: {volume_signal}"
+        )
 
 # =============================================
-# ENHANCED SIGNAL GENERATOR WITH ML
+# ENHANCED SIGNAL GENERATOR WITH ML/TECHNICAL TOGGLE
 # =============================================
 
 class MLEnhancedSignalGenerator:
@@ -565,20 +788,77 @@ class MLEnhancedSignalGenerator:
             indicators['obv'] / 1000000 if abs(indicators['obv']) > 0 else 0
         ])
         
-        # Get ML prediction
-        ml_prediction = self.ml_manager.predict(symbol, features)
+        # Create market state
+        market_state = MarketState(
+            symbol=symbol,
+            timestamp=datetime.now(),
+            price=current_price,
+            volume=indicators.get('volume_ratio', 1.0) * 1000,  # Simulated volume
+            spread=0.001,  # Simulated spread
+            
+            # Technical indicators
+            rsi=indicators['rsi'],
+            macd=indicators['macd'],
+            macd_signal=indicators['macd_signal'],
+            macd_histogram=indicators['macd_histogram'],
+            bb_upper=indicators['bb_upper'],
+            bb_middle=indicators['bb_middle'],
+            bb_lower=indicators['bb_lower'],
+            bb_width=indicators['bb_width'],
+            atr=indicators['atr'],
+            vwap=indicators['vwap'],
+            obv=indicators['obv'],
+            momentum=indicators['momentum'],
+            volatility=indicators['volatility'],
+            volume_ratio=indicators['volume_ratio'],
+            
+            # ML features
+            features=features
+        )
         
-        # Only proceed if ML has high confidence
-        if ml_prediction.confidence < MIN_CONFIDENCE:
-            log_callback(f"⏸️ {symbol}: ML confidence {ml_prediction.confidence:.1f}% < {MIN_CONFIDENCE}%")
+        # Use ML or Technical analysis based on mode
+        if ANALYSIS_MODE == "ML" and not TEST_MODE:
+            # Get ML prediction
+            ml_prediction = self.ml_manager.predict(symbol, features)
+            
+            # Dynamic confidence threshold
+            dynamic_threshold = MIN_CONFIDENCE
+            training_samples = len(self.ml_manager.feature_history) if hasattr(self.ml_manager, 'feature_history') else 0
+            
+            if training_samples < 50:
+                dynamic_threshold = 50
+            elif training_samples < 200:
+                dynamic_threshold = 60
+            
+            if ml_prediction.confidence < dynamic_threshold:
+                log_callback(f"⏸️ {symbol}: ML confidence {ml_prediction.confidence:.1f}% < {dynamic_threshold}%")
+                return None
+            
+            direction = ml_prediction.direction
+            confidence = ml_prediction.confidence
+            prediction_source = "ML"
+            reason = f"ML Signal | Confidence: {ml_prediction.confidence:.1f}%"
+            ml_pred = ml_prediction
+            tech_pred = None
+            
+        else:
+            # Use pure technical analysis
+            technical_prediction = self.ta_analyzer.analyze_technical_signals(indicators)
+            
+            if technical_prediction.confidence < MIN_CONFIDENCE:
+                log_callback(f"⏸️ {symbol}: Technical confidence {technical_prediction.confidence:.1f}% < {MIN_CONFIDENCE}%")
+                return None
+            
+            direction = technical_prediction.direction
+            confidence = technical_prediction.confidence
+            prediction_source = "TECHNICAL"
+            reason = technical_prediction.reason
+            ml_pred = None
+            tech_pred = technical_prediction
+        
+        if direction == "NEUTRAL":
+            log_callback(f"⏸️ {symbol}: {prediction_source} neutral (Confidence: {confidence:.1f}%)")
             return None
-        
-        # Determine direction from ML
-        if ml_prediction.direction == "NEUTRAL":
-            log_callback(f"⏸️ {symbol}: ML neutral (Confidence: {ml_prediction.confidence:.1f}%)")
-            return None
-        
-        direction = ml_prediction.direction
         
         # Calculate targets based on ATR for 30-100 pip range
         atr_pips = indicators['atr'] / PIP_CONFIG.get(symbol, 0.01)
@@ -628,34 +908,6 @@ class MLEnhancedSignalGenerator:
         # Calculate position size based on 2% risk
         position_size = (RISK_PER_TRADE * 10000) / risk_pips  # Simplified calculation
         
-        # Create market state
-        market_state = MarketState(
-            symbol=symbol,
-            timestamp=datetime.now(),
-            price=current_price,
-            volume=indicators.get('volume_ratio', 1.0) * 1000,  # Simulated volume
-            spread=0.001,  # Simulated spread
-            
-            # Technical indicators
-            rsi=indicators['rsi'],
-            macd=indicators['macd'],
-            macd_signal=indicators['macd_signal'],
-            macd_histogram=indicators['macd_histogram'],
-            bb_upper=indicators['bb_upper'],
-            bb_middle=indicators['bb_middle'],
-            bb_lower=indicators['bb_lower'],
-            bb_width=indicators['bb_width'],
-            atr=indicators['atr'],
-            vwap=indicators['vwap'],
-            obv=indicators['obv'],
-            momentum=indicators['momentum'],
-            volatility=indicators['volatility'],
-            volume_ratio=indicators['volume_ratio'],
-            
-            # ML features
-            features=features
-        )
-        
         # Create signal
         signal = ScalpingSignal(
             signal_id=f"SIG-{int(time.time())}-{random.randint(1000, 9999)}",
@@ -666,13 +918,13 @@ class MLEnhancedSignalGenerator:
             take_profit_1=round(float(take_profit_1), 4),
             take_profit_2=round(float(take_profit_2), 4),
             take_profit_3=round(float(take_profit_3), 4),
-            confidence=ml_prediction.confidence,
+            confidence=confidence,
             risk_reward=float(risk_reward),
             position_size=round(float(position_size), 4),
-            ml_prediction=ml_prediction,
+            ml_prediction=ml_pred,
+            technical_prediction=tech_pred,
             market_state=market_state,
-            reason=f"ML Enhanced Scalping | Confidence: {ml_prediction.confidence:.1f}% | "
-                   f"ATR: {atr_pips:.1f}pips | Target: {target_pips:.1f}pips",
+            reason=reason + f" | ATR: {atr_pips:.1f}pips | Target: {target_pips:.1f}pips",
             created_at=datetime.now(),
             expiry=datetime.now() + timedelta(minutes=15)
         )
@@ -680,12 +932,13 @@ class MLEnhancedSignalGenerator:
         # Log signal
         risk_pips, target_pips = signal.calculate_pips()
         
-        log_callback(f"🎯 {symbol} {direction} SIGNAL")
+        log_callback(f"🎯 {symbol} {direction} SIGNAL ({prediction_source})")
         log_callback(f"   Entry: ${entry:.4f} | SL: ${stop_loss:.4f}")
         log_callback(f"   TP1: ${take_profit_1:.4f} | TP2: ${take_profit_2:.4f} | TP3: ${take_profit_3:.4f}")
         log_callback(f"   Risk: {risk_pips:.1f}pips | Target: {target_pips:.1f}pips")
-        log_callback(f"   ML Confidence: {ml_prediction.confidence:.1f}% | RRR: 1:{risk_reward:.1f}")
+        log_callback(f"   Confidence: {confidence:.1f}% | RRR: 1:{risk_reward:.1f}")
         log_callback(f"   Position: {position_size:.4f} units")
+        log_callback(f"   Reason: {reason}")
         
         self.signal_history.append(signal)
         
@@ -720,7 +973,11 @@ class EnhancedScalpingTradeManager:
         
         log_callback(f"✅ TRADE EXECUTED: {signal.signal_id}")
         log_callback(f"   {signal.symbol} {signal.direction}")
-        log_callback(f"   ML Confidence: {signal.ml_prediction.confidence:.1f}%")
+        
+        if signal.ml_prediction:
+            log_callback(f"   ML Confidence: {signal.ml_prediction.confidence:.1f}%")
+        elif signal.technical_prediction:
+            log_callback(f"   Technical Confidence: {signal.technical_prediction.confidence:.1f}%")
         
         # Send Telegram alert
         await self.send_telegram_alert(signal)
@@ -734,8 +991,7 @@ class EnhancedScalpingTradeManager:
         for signal_id, trade_data in list(self.active_trades.items()):
             signal = trade_data['signal']
             
-            # Simulate price movement (in real bot, get from market)
-            # For demonstration, we'll simulate random walk
+            # Simulate price movement
             entry_price = signal.entry_price
             current_time = datetime.now()
             time_elapsed = (current_time - trade_data['entry_time']).total_seconds()
@@ -754,23 +1010,25 @@ class EnhancedScalpingTradeManager:
                 if current_price <= signal.stop_loss:
                     await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
                     closed_trades.append(signal_id)
-                    # Add to training data as loss
-                    self.ml_manager.add_training_data(
-                        signal.symbol,
-                        signal.market_state.features,
-                        label=0  # Loss
-                    )
+                    # Add to training data if ML mode
+                    if ANALYSIS_MODE == "ML" and signal.ml_prediction:
+                        self.ml_manager.add_training_data(
+                            signal.symbol,
+                            signal.market_state.features,
+                            label=0  # Loss
+                        )
                     
                 # Check take profits
                 elif current_price >= signal.take_profit_3 and 'TP3' not in trade_data['partial_tps']:
                     await self.close_trade(signal_id, current_price, "TAKE_PROFIT_3", log_callback)
                     closed_trades.append(signal_id)
-                    # Add to training data as win
-                    self.ml_manager.add_training_data(
-                        signal.symbol,
-                        signal.market_state.features,
-                        label=1  # Win
-                    )
+                    # Add to training data if ML mode
+                    if ANALYSIS_MODE == "ML" and signal.ml_prediction:
+                        self.ml_manager.add_training_data(
+                            signal.symbol,
+                            signal.market_state.features,
+                            label=1  # Win
+                        )
                     
                 elif current_price >= signal.take_profit_2 and 'TP2' not in trade_data['partial_tps']:
                     log_callback(f"🎯 {signal_id}: Hit TP2 at ${current_price:.4f}")
@@ -784,20 +1042,22 @@ class EnhancedScalpingTradeManager:
                 if current_price >= signal.stop_loss:
                     await self.close_trade(signal_id, current_price, "STOP_LOSS", log_callback)
                     closed_trades.append(signal_id)
-                    self.ml_manager.add_training_data(
-                        signal.symbol,
-                        signal.market_state.features,
-                        label=0  # Loss
-                    )
+                    if ANALYSIS_MODE == "ML" and signal.ml_prediction:
+                        self.ml_manager.add_training_data(
+                            signal.symbol,
+                            signal.market_state.features,
+                            label=0  # Loss
+                        )
                     
                 elif current_price <= signal.take_profit_3 and 'TP3' not in trade_data['partial_tps']:
                     await self.close_trade(signal_id, current_price, "TAKE_PROFIT_3", log_callback)
                     closed_trades.append(signal_id)
-                    self.ml_manager.add_training_data(
-                        signal.symbol,
-                        signal.market_state.features,
-                        label=1  # Win
-                    )
+                    if ANALYSIS_MODE == "ML" and signal.ml_prediction:
+                        self.ml_manager.add_training_data(
+                            signal.symbol,
+                            signal.market_state.features,
+                            label=1  # Win
+                        )
                     
                 elif current_price <= signal.take_profit_2 and 'TP2' not in trade_data['partial_tps']:
                     log_callback(f"🎯 {signal_id}: Hit TP2 at ${current_price:.4f}")
@@ -869,12 +1129,21 @@ class EnhancedScalpingTradeManager:
             direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
             risk_pips, target_pips = signal.calculate_pips()
             
+            if signal.ml_prediction:
+                analysis_type = "ML ENHANCED"
+                confidence = signal.ml_prediction.confidence
+                details = f"ML Confidence: {signal.ml_prediction.confidence:.1f}%\nModel: {signal.ml_prediction.model_name}"
+            else:
+                analysis_type = "TECHNICAL ANALYSIS"
+                confidence = signal.technical_prediction.confidence
+                details = f"Technical Confidence: {signal.technical_prediction.confidence:.1f}%\nSignals: {signal.technical_prediction.reason}"
+            
             message = f"""
-⚡ ML ENHANCED SCALPING SIGNAL ⚡
+⚡ {analysis_type} SCALPING SIGNAL ⚡
 
 {direction_emoji} {signal.symbol} {signal.direction}
 Strategy: Medium-Range Scalping (5-15 min)
-ML Confidence: {signal.ml_prediction.confidence:.1f}%
+Confidence: {confidence:.1f}%
 
 🎯 Price Levels:
 Entry: ${signal.entry_price:.4f}
@@ -887,16 +1156,7 @@ Target: {target_pips:.1f} pips
 Risk/Reward: 1:{signal.risk_reward:.1f}
 Position Size: {signal.position_size:.4f} units
 
-🤖 ML Details:
-Model: {signal.ml_prediction.model_name}
-Long Probability: {signal.ml_prediction.probability_long:.1%}
-Short Probability: {signal.ml_prediction.probability_short:.1%}
-
-📈 Technicals:
-RSI: {signal.market_state.rsi:.1f}
-MACD Hist: {signal.market_state.macd_histogram:.4f}
-ATR: {signal.market_state.atr:.4f}
-Volatility: {signal.market_state.volatility:.2f}%
+{details}
 
 Time: {datetime.now().strftime('%H:%M:%S')}
 """
@@ -929,6 +1189,7 @@ Time: {datetime.now().strftime('%H:%M:%S')}
 📊 Performance Summary:
 Symbol: {signal.symbol}
 Direction: {signal.direction}
+Analysis: {ANALYSIS_MODE}
 Duration: 5-15 min (Medium Range)
 
 💵 Results:
@@ -940,12 +1201,8 @@ Pips: {pips:+.1f}
 
 📝 Details:
 Reason: {reason}
-ML Confidence Was: {signal.ml_prediction.confidence:.1f}%
+Confidence Was: {signal.confidence:.1f}%
 Risk/Reward Was: 1:{signal.risk_reward:.1f}
-
-🤖 ML Performance:
-Model: {signal.ml_prediction.model_name}
-Signal Quality: {'Good' if pnl > 0 else 'Poor'}
 
 Closed at: {datetime.now().strftime('%H:%M:%S')}
 """
@@ -976,7 +1233,7 @@ class MLEnhancedGUI:
     def __init__(self, bot):
         self.bot = bot
         self.root = tk.Tk()
-        self.root.title("🤖 AI SCALPING BOT - ML ENHANCED")
+        self.root.title(f"🤖 AI SCALPING BOT - {ANALYSIS_MODE} MODE")
         self.root.geometry("1400x900")
         
         # Configure dark theme
@@ -1033,7 +1290,7 @@ class MLEnhancedGUI:
         left_stats.pack(side='left', fill='both', expand=True, padx=(0, 5))
         
         # Right stats
-        right_stats = ttk.LabelFrame(top_panel, text="🤖 ML METRICS", padding=10)
+        right_stats = ttk.LabelFrame(top_panel, text="🤖 ANALYSIS METRICS", padding=10)
         right_stats.pack(side='right', fill='both', expand=True, padx=(5, 0))
         
         # Performance metrics
@@ -1055,17 +1312,17 @@ class MLEnhancedGUI:
             self.metric_labels[key] = ttk.Label(row, text=default, style='Value.TLabel')
             self.metric_labels[key].pack(side='right')
         
-        # ML metrics
-        ml_metrics = [
-            ("ML Confidence:", "ml_confidence", "0.0%"),
-            ("Model Accuracy:", "model_accuracy", "0.0%"),
-            ("BTC Predictions:", "btc_predictions", "0"),
-            ("ETH Predictions:", "eth_predictions", "0"),
+        # Analysis metrics
+        analysis_metrics = [
+            ("Analysis Mode:", "analysis_mode", ANALYSIS_MODE),
+            ("Confidence:", "current_confidence", "0.0%"),
+            ("BTC Signals:", "btc_signals", "0"),
+            ("ETH Signals:", "eth_signals", "0"),
             ("Training Samples:", "training_samples", "0"),
             ("Last Signal:", "last_signal", "None")
         ]
         
-        for i, (label, key, default) in enumerate(ml_metrics):
+        for i, (label, key, default) in enumerate(analysis_metrics):
             row = ttk.Frame(right_stats)
             row.pack(fill='x', pady=2)
             
@@ -1103,6 +1360,18 @@ class MLEnhancedGUI:
         control_frame = ttk.LabelFrame(bottom_panel, text="⚙️ CONTROLS", padding=10)
         control_frame.pack(side='left', fill='both', padx=(0, 5))
         
+        # Mode toggle
+        mode_frame = ttk.Frame(control_frame)
+        mode_frame.pack(pady=5)
+        
+        ttk.Label(mode_frame, text="Analysis Mode:", style='Metric.TLabel').pack(side='left', padx=(0, 5))
+        
+        self.mode_var = tk.StringVar(value=ANALYSIS_MODE)
+        self.mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, 
+                                      values=["ML", "TECHNICAL"], state='readonly', width=15)
+        self.mode_combo.pack(side='left')
+        self.mode_combo.bind('<<ComboboxSelected>>', self.on_mode_change)
+        
         # Control buttons
         self.start_btn = ttk.Button(control_frame, text="▶️ START BOT", 
                                    command=self.start_bot, width=20)
@@ -1115,6 +1384,9 @@ class MLEnhancedGUI:
         
         ttk.Button(control_frame, text="🤖 TRAIN MODELS", 
                   command=self.train_models, width=20).pack(pady=5)
+        
+        ttk.Button(control_frame, text="🔄 TOGGLE MODE", 
+                  command=self.toggle_mode, width=20).pack(pady=5)
         
         ttk.Button(control_frame, text="🗑️ CLEAR LOGS", 
                   command=self.clear_logs, width=20).pack(pady=5)
@@ -1131,6 +1403,13 @@ class MLEnhancedGUI:
             ttk.Label(symbol_frame, text=f"  {symbol}", 
                      style='Value.TLabel').pack(anchor='w')
         
+        # Test mode indicator
+        test_frame = ttk.Frame(control_frame)
+        test_frame.pack(pady=5)
+        
+        test_text = "✅ TEST MODE: ON" if TEST_MODE else "❌ TEST MODE: OFF"
+        ttk.Label(test_frame, text=test_text, style='Value.TLabel').pack()
+        
         # Right: Logs
         log_frame = ttk.LabelFrame(bottom_panel, text="📝 LIVE TRADING LOG", padding=5)
         log_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
@@ -1143,7 +1422,7 @@ class MLEnhancedGUI:
         
         # Status bar
         self.status_bar = ttk.Label(self.root, 
-                                   text="🤖 AI SCALPING BOT READY | ML Models Loaded | Press START",
+                                   text=f"🤖 AI SCALPING BOT READY | {ANALYSIS_MODE} MODE | Press START",
                                    relief='sunken',
                                    anchor='center',
                                    font=('Arial', 10))
@@ -1171,6 +1450,20 @@ class MLEnhancedGUI:
         
         self.canvas_pnl.draw()
         self.canvas_winloss.draw()
+    
+    def on_mode_change(self, event=None):
+        """Handle mode change."""
+        global ANALYSIS_MODE
+        ANALYSIS_MODE = self.mode_var.get()
+        self.root.title(f"🤖 AI SCALPING BOT - {ANALYSIS_MODE} MODE")
+        self.add_log(f"🔄 Analysis mode changed to: {ANALYSIS_MODE}")
+    
+    def toggle_mode(self):
+        """Toggle between ML and Technical analysis."""
+        current_mode = self.mode_var.get()
+        new_mode = "TECHNICAL" if current_mode == "ML" else "ML"
+        self.mode_var.set(new_mode)
+        self.on_mode_change()
     
     def update_pnl_graph(self, pnl_data: List[float]):
         """Update PnL graph."""
@@ -1242,15 +1535,18 @@ class MLEnhancedGUI:
         try:
             # Update status
             status = "RUNNING" if not self.bot.paused else "PAUSED"
-            ml_status = "ACTIVE" if self.bot.ml_manager.models else "INACTIVE"
+            mode = self.mode_var.get()
             
             self.status_bar.config(
-                text=f"🤖 {status} | ML: {ml_status} | "
+                text=f"🤖 {status} | {mode} MODE | "
                      f"Cycles: {self.bot.cycle_count} | "
                      f"Signals: {self.bot.signals_today} | "
                      f"Active Trades: {len(self.bot.trade_manager.active_trades)} | "
                      f"{datetime.now().strftime('%H:%M:%S')}"
             )
+            
+            # Update analysis mode label
+            self.metric_labels['analysis_mode'].config(text=mode)
             
             # Get performance data
             wins = sum(1 for t in self.bot.trade_manager.trade_history if t['pnl'] > 0)
@@ -1276,19 +1572,25 @@ class MLEnhancedGUI:
             self.metric_labels['avg_duration'].config(text=f"{avg_duration:.1f}m")
             self.metric_labels['total_trades'].config(text=str(total_trades))
             
-            # Update ML metrics
+            # Update analysis metrics
             if hasattr(self.bot.ml_manager, 'feature_history'):
                 training_samples = len(self.bot.ml_manager.feature_history)
                 self.metric_labels['training_samples'].config(text=str(training_samples))
             
-            # Get last signal
+            # Count signals by symbol
+            btc_signals = sum(1 for s in self.bot.signal_generator.signal_history if "BTC" in s.symbol)
+            eth_signals = sum(1 for s in self.bot.signal_generator.signal_history if "ETH" in s.symbol)
+            self.metric_labels['btc_signals'].config(text=str(btc_signals))
+            self.metric_labels['eth_signals'].config(text=str(eth_signals))
+            
+            # Get last signal confidence
             if self.bot.signal_generator.signal_history:
                 last_signal = self.bot.signal_generator.signal_history[-1]
                 self.metric_labels['last_signal'].config(
                     text=f"{last_signal.symbol} {last_signal.direction}"
                 )
-                self.metric_labels['ml_confidence'].config(
-                    text=f"{last_signal.ml_prediction.confidence:.1f}%"
+                self.metric_labels['current_confidence'].config(
+                    text=f"{last_signal.confidence:.1f}%"
                 )
             
             # Update graphs
@@ -1322,7 +1624,7 @@ class MLEnhancedGUI:
         self.start_btn.config(state='disabled')
         self.pause_btn.config(state='normal')
         self.add_log("▶️ AI Scalping Bot STARTED")
-        self.add_log("🤖 ML models active - Learning from trades")
+        self.add_log(f"🤖 Analysis Mode: {self.mode_var.get()}")
         self.add_log("🎯 Targeting 30-100 pips per trade")
         self.add_log("⏱️ Trade duration: 5-15 minutes")
     
@@ -1331,8 +1633,10 @@ class MLEnhancedGUI:
         self.bot.paused = True
         self.start_btn.config(state='normal')
         self.pause_btn.config(state='disabled')
-        self.add_log("⏸️ Bot PAUSED - ML models saved")
-        self.bot.ml_manager.save_models()
+        self.add_log("⏸️ Bot PAUSED")
+        if self.mode_var.get() == "ML":
+            self.bot.ml_manager.save_models()
+            self.add_log("💾 ML models saved")
     
     def train_models(self):
         """Manually train ML models."""
@@ -1371,6 +1675,7 @@ class AIScalpingBot:
         self.ta_analyzer = EnhancedTechnicalAnalyzer()
         self.signal_generator = MLEnhancedSignalGenerator(self.ml_manager, self.ta_analyzer)
         self.trade_manager = EnhancedScalpingTradeManager(self.ml_manager)
+        self.market_data_gen = SyntheticMarketData()
         
         # State
         self.cycle_count = 0
@@ -1379,22 +1684,29 @@ class AIScalpingBot:
         self.gui = None
         
         print("✅ AI Bot initialized successfully")
+        print(f"   • Analysis Mode: {ANALYSIS_MODE}")
         print("   • ML Models: Random Forest + Neural Network Ensemble")
+        print("   • Technical Analysis: 10+ indicators with signal scoring")
         print("   • Timeframe: Medium-range scalping (5-15 min)")
         print("   • Target: 30-100 pips per trade")
         print("   • Instruments: BTC & ETH only")
         print("   • Risk: 2% per trade, 1:2+ RRR")
+        print("   • Test Mode:", "ON" if TEST_MODE else "OFF")
         print("="*70)
     
     def set_gui(self, gui):
         """Set enhanced GUI."""
         self.gui = gui
-        self.gui.add_log("🤖 AI Scalping Bot Ready - Medium Range Strategy")
-        self.gui.add_log("✅ ML models loaded: Random Forest + Neural Network")
+        self.gui.add_log(f"🤖 AI Scalping Bot Ready - {ANALYSIS_MODE} Mode")
+        if ANALYSIS_MODE == "ML":
+            self.gui.add_log("✅ ML models loaded: Random Forest + Neural Network")
+        else:
+            self.gui.add_log("✅ Technical analysis system ready")
         self.gui.add_log("🎯 Target: 30-100 pips per trade (5-15 minute duration)")
         self.gui.add_log("⚖️ Risk Management: 2% per trade, 1:2+ RRR")
         self.gui.add_log("📊 Real-time performance graphs initialized")
-        self.gui.add_log("Press START to begin AI-enhanced scalping")
+        self.gui.add_log("🔄 Use the TOGGLE MODE button to switch between ML and Technical analysis")
+        self.gui.add_log("Press START to begin trading")
     
     async def run_cycle(self):
         """Run one trading cycle."""
@@ -1414,9 +1726,9 @@ class AIScalpingBot:
             
             # Update technical analysis for each symbol
             for symbol in TRADING_PAIRS:
-                # Simulate price update (in real bot, get from API)
-                current_price = 1000.0 if "BTC" in symbol else 100.0  # Placeholder
-                volume = 1000.0  # Placeholder
+                # Generate synthetic market data
+                current_price = self.market_data_gen.generate_price(symbol)
+                volume = self.market_data_gen.generate_volume()
                 
                 await self.ta_analyzer.update_history(symbol, current_price, volume)
                 
@@ -1429,7 +1741,7 @@ class AIScalpingBot:
                 if active_for_symbol >= 1:
                     continue
                 
-                # Generate signal using ML
+                # Generate signal using ML or Technical analysis
                 signal = await self.signal_generator.generate_signal(
                     symbol,
                     self.gui.add_log if self.gui else print
@@ -1456,7 +1768,7 @@ class AIScalpingBot:
         print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         if self.gui:
-            self.gui.add_log("✅ ML models initialized")
+            self.gui.add_log("✅ Market data generator initialized")
             self.gui.add_log("✅ Technical analysis ready")
             self.gui.add_log("✅ Telegram alerts enabled")
         
@@ -1469,13 +1781,13 @@ class AIScalpingBot:
             print("\n🛑 Bot stopped by user")
             if self.gui:
                 self.gui.add_log("🛑 Bot stopped by user")
-                self.gui.add_log("💾 Saving ML models...")
+                self.gui.add_log("💾 Saving models...")
             
-            # Save models
+            # Save ML models
             self.ml_manager.save_models()
             
             if self.gui:
-                self.gui.add_log("✅ ML models saved successfully")
+                self.gui.add_log("✅ Models saved successfully")
                 
         except Exception as e:
             error_msg = f"❌ Bot error: {str(e)}"
@@ -1518,29 +1830,31 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("🤖 AI ENHANCED SCALPING BOT - MEDIUM RANGE STRATEGY")
     print("="*70)
-    print("\n✨ ENHANCED FEATURES:")
-    print("1. 🤖 ML ENSEMBLE: Random Forest + Neural Network")
-    print("2. 🎯 MEDIUM RANGE: 5-15 minute trades, 30-100 pip targets")
-    print("3. 📊 ADVANCED TA: 10+ technical indicators")
-    print("4. 🔄 CONTINUOUS LEARNING: ML models learn from every trade")
-    print("5. 📈 REAL-TIME GRAPHS: PnL progression & win/loss distribution")
-    print("6. ⚖️ RISK MANAGEMENT: 2% risk, 1:2+ RRR, partial TP management")
-    print("7. 📱 TELEGRAM ALERTS: Detailed ML performance reporting")
-    print("8. 💾 MODEL PERSISTENCE: Save/load trained models")
+    print(f"\n✨ CURRENT MODE: {ANALYSIS_MODE}")
     
-    print("\n🎯 TRADING PARAMETERS:")
-    print("• Instruments: BTC & ETH only")
-    print("• Trade Duration: 5-15 minutes")
+    if ANALYSIS_MODE == "ML":
+        print("✨ ENHANCED FEATURES:")
+        print("1. 🤖 ML ENSEMBLE: Random Forest + Neural Network")
+        print("2. 📚 INITIAL TRAINING: Pre-trained with 200 samples")
+        print("3. 🔄 CONTINUOUS LEARNING: ML models learn from every trade")
+    else:
+        print("✨ TECHNICAL ANALYSIS FEATURES:")
+        print("1. 📊 MULTI-INDICATOR SCORING: RSI, MACD, Bollinger Bands, Volume")
+        print("2. 🎯 SIGNAL CONFLUENCE: Weighted scoring system")
+        print("3. 📈 REAL-TIME ANALYSIS: Dynamic signal strength calculation")
+    
+    print("\n🎯 COMMON TRADING PARAMETERS:")
+    print("• Timeframe: Medium-range scalping (5-15 minutes)")
     print("• Target Range: 30-100 pips")
+    print("• Instruments: BTC & ETH only")
     print("• Risk per Trade: 2%")
     print("• Minimum RRR: 1:2")
-    print("• ML Confidence Threshold: 70%")
+    print("• Minimum Confidence: 70%")
     
-    print("\n🤖 ML MODEL DETAILS:")
-    print("• Ensemble: Random Forest (60%) + Neural Network (40%)")
-    print("• Features: 10 technical indicators")
-    print("• Training: Continuous learning from trade outcomes")
-    print("• Prediction: Direction + Confidence scoring")
+    print("\n🔄 TOGGLE FEATURE:")
+    print("• Use the TOGGLE MODE button in the GUI to switch between ML and Technical analysis")
+    print("• ML Mode: Uses ensemble ML models with confidence scoring")
+    print("• Technical Mode: Pure technical analysis with multi-indicator confluence")
     print("="*70 + "\n")
     
     main()
