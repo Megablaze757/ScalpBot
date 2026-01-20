@@ -36,12 +36,11 @@ import pickle
 warnings.filterwarnings('ignore')
 
 # =============================================
-# CONFIGURATION
 # =============================================
-TELEGRAM_BOT_TOKEN = "
-8285366409:AAH9kdy1D-xULBmGakAPFYUME19fmVCDJ9E"
-TELEGRAM_CHAT_ID = "-1003525746518"
-
+# CONFIGURATION - YOUR NEW OFFICIAL TOKEN
+# =============================================
+TELEGRAM_BOT_TOKEN = "8285366409:AAH9kdy1D-xULBmGakAPFYUME19fmVCDJ9E"
+TELEGRAM_CHAT_ID = "-1003525746518"  # Keep your existing chat ID
 # Trading Parameters
 SCAN_INTERVAL = 3  # 3 seconds for fast scanning
 MAX_CONCURRENT_TRADES = 2
